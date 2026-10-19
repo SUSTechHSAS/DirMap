@@ -704,7 +704,7 @@ $('open-diagnostics').onclick = () => {
       `最后通过校验距今: ${age(d.lastAcceptedReceivedAt)}`,
       `最近定位错误: ${d.lastGeoError ?? '无'}`,
       `朝向接口: ${d.orientationSupported ? '有' : '无'}   朝向权限: ${d.orientationPermissionRequired ? (d.orientationPermissionGranted ? '已允许' : '未允许/未请求（iOS 需允许“动作与方向”）') : '无需（非 iOS）'}`,
-      `朝向事件: ${d.orientationEventCount}（其中绝对方向 ${d.absoluteEventCount}）   有效朝向样本: ${d.headingSampleCount}`,
+      `朝向事件: ${d.orientationEventCount}（其中绝对方向 ${d.absoluteEventCount}）   有效朝向样本: ${d.headingSampleCount}（绝对 ${d.absoluteSampleCount} / Sensor ${d.sensorSampleCount}）${d.orientationSensorActive ? ' · Sensor API 已启用' : ''}`,
       `当前朝向: ${d.heading === null ? '无' : `${Math.round(d.heading)}°`}${d.relativeSeen ? '（相对方向，需校准）' : ''}`,
       `UA: ${navigator.userAgent}`,
     ].join('\n');

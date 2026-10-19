@@ -103,7 +103,12 @@ export class NavigationSensors {
   absoluteEventCount = 0;
   headingSampleCount = 0;
   relativeSeen = false;
+  absoluteSampleCount = 0;
+  lastAbsoluteSampleAt = 0;
+  sensorSampleCount = 0;
   locationTimeoutMs = 12000;
+  private orientationSensor: { start(): void; stop(): void } | null = null;
+  private sensorTimer: ReturnType<typeof setTimeout> | null = null;
   active = false;
   declination: number | null = null;
   offset = 0;
@@ -124,22 +129,32 @@ export class NavigationSensors {
     const angle = screen.orientation?.angle ?? Number((window as Window & { orientation?: number }).orientation ?? 0);
     let sample = compassSample(event, angle, timestamp, this.declination);
     let relative = false;
-    if (!sample) {
-      // No absolute north from this browser/device: expose the relative device
-      // direction so the teacher can still calibrate against a known bearing
-      // (map rotation stays disabled until calibrated).
-      const degrees = orientationHeading(event.alpha, event.beta, event.gamma, angle, false, true);
-      if (degrees !== null) {
-        sample = { degrees, timestamp, source: 'compass', reference: 'magnetic', relative: true };
-        relative = true;
-        if (!this.relativeSeen) {
-          this.relativeSeen = true;
-          this.onStatus('此设备/浏览器未提供绝对北向：已启用相对方向，请对准已知方位后点“校准罗盘”');
+    if (sample) {
+      this.absoluteSampleCount++;
+      this.lastAbsoluteSampleAt = Date.now();
+      if (this.orientationSensor) this.stopOrientationSensor();
+    } else {
+      // Both `deviceorientation` (relative) and `deviceorientationabsolute`
+      // events fire on most phones. Only fall back to the relative device
+      // direction when the absolute north has produced no usable heading for a
+      // while; mixing the two streams made the heading (and status text) jump
+      // between two unrelated directions.
+      const now = Date.now();
+      const gracePassed = now - this.startedAt > 1200;
+      const absoluteRecently = now - this.lastAbsoluteSampleAt < 3000;
+      if (gracePassed && !absoluteRecently) {
+        const degrees = orientationHeading(event.alpha, event.beta, event.gamma, angle, false, true);
+        if (degrees !== null) {
+          sample = { degrees, timestamp, source: 'compass', reference: 'magnetic', relative: true };
+          relative = true;
+          if (!this.relativeSeen) {
+            this.relativeSeen = true;
+            this.onStatus('此设备/浏览器未提供绝对北向：已启用相对方向，请对准已知方位后点“校准罗盘”');
+          }
         }
       }
     }
     if (sample) {
-      if (!relative) this.relativeSeen = false;
       sample.degrees = normalize(sample.degrees + this.offset);
       if (this.calibrated) sample.reference = 'true';
       this.filter.push(sample, Date.now());
@@ -176,6 +191,7 @@ export class NavigationSensors {
     this.rawPositionCount = 0; this.acceptedPositionCount = 0; this.lastGeoError = null;
     this.lastRawTimestamp = 0; this.lastRawReceivedAt = 0; this.lastAcceptedReceivedAt = 0;
     this.orientationEventCount = 0; this.absoluteEventCount = 0; this.headingSampleCount = 0;
+    this.absoluteSampleCount = 0; this.lastAbsoluteSampleAt = 0; this.relativeSeen = false;
     if (typeof window.DeviceOrientationEvent === 'undefined') {
       this.onStatus('此浏览器不支持手机朝向，将仅使用 GPS 行进方向');
     } else {
@@ -190,6 +206,12 @@ export class NavigationSensors {
         this.onStatus('尚未收到罗盘数据：请允许“动作与方向”权限（iOS：设置 › Safari › 动作与方向访问），或在校准后使用行进方向');
       }, 6000);
     }
+    // Chromium-based browsers (including HarmonyOS ArkWeb) sometimes emit
+    // deviceorientation events without a usable absolute heading but do expose
+    // the Generic Sensor API. Try it when no absolute sample arrived.
+    this.sensorTimer = setTimeout(() => {
+      if (this.active && this.absoluteSampleCount === 0) this.startOrientationSensor();
+    }, 3000);
     this.timer = setInterval(() => { if (!document.hidden) this.onHeading(this.filter.value(Date.now())); }, 50);
   }
 
@@ -270,6 +292,59 @@ export class NavigationSensors {
     }
   }
 
+  /** OrientationSensor API fallback (absolute north when DOM events lack it). */
+  private startOrientationSensor() {
+    if (this.orientationSensor) return;
+    const Ctor = (window as unknown as { AbsoluteOrientationSensor?: new (options?: unknown) => {
+      start(): void; stop(): void; quaternion?: number[] | null;
+      onreading: (() => void) | null; onerror: (() => void) | null;
+    } }).AbsoluteOrientationSensor;
+    if (typeof Ctor !== 'function') return;
+    const begin = () => {
+      if (!this.active || this.orientationSensor) return;
+      try {
+        const sensor = new Ctor({ frequency: 30, referenceFrame: 'device' });
+        sensor.onreading = () => {
+          if (!this.active) return;
+          const q = sensor.quaternion;
+          if (!q || q.length < 4) return;
+          const angle = (screen.orientation?.angle ?? Number((window as Window & { orientation?: number }).orientation ?? 0)) * Math.PI / 180;
+          const [x, y, z, w] = q;
+          // Rotate the screen-top vector into the earth frame (x east, y north).
+          const vx = Math.sin(angle), vy = Math.cos(angle);
+          const east = (1 - 2 * (y * y + z * z)) * vx + 2 * (x * y - w * z) * vy;
+          const north = 2 * (x * y + w * z) * vx + (1 - 2 * (x * x + z * z)) * vy;
+          if (Math.hypot(east, north) < .25) return;
+          const now = Date.now();
+          const degrees = normalize(Math.atan2(east, north) * 180 / Math.PI + (this.declination ?? 0));
+          const sample: HeadingSample = { degrees, timestamp: now, source: 'compass', reference: this.declination === null ? 'magnetic' : 'true' };
+          this.headingSampleCount++;
+          this.absoluteSampleCount++;
+          this.sensorSampleCount++;
+          this.lastAbsoluteSampleAt = now;
+          this.filter.push(sample, now);
+          if (!this.headingSeen) {
+            this.headingSeen = true;
+            if (this.headingTimer !== null) clearTimeout(this.headingTimer);
+            this.headingTimer = null;
+          }
+        };
+        sensor.onerror = () => { try { sensor.stop(); } catch { /* ignore */ } this.orientationSensor = null; };
+        sensor.start();
+        this.orientationSensor = sensor;
+      } catch { this.orientationSensor = null; }
+    };
+    // Do not gate on permissions.query('accelerometer'): many browsers report
+    // 'denied' there while the sensor still starts (or throws a catchable
+    // NotAllowedError on start). Attempt it and ignore failures.
+    begin();
+  }
+
+  private stopOrientationSensor() {
+    try { this.orientationSensor?.stop(); } catch { /* ignore */ }
+    this.orientationSensor = null;
+  }
+
   /** Snapshot for the in-app 定位诊断 panel. */
   diagnostics() {
     return {
@@ -293,6 +368,9 @@ export class NavigationSensors {
       orientationEventCount: this.orientationEventCount,
       absoluteEventCount: this.absoluteEventCount,
       headingSampleCount: this.headingSampleCount,
+      absoluteSampleCount: this.absoluteSampleCount,
+      sensorSampleCount: this.sensorSampleCount,
+      orientationSensorActive: this.orientationSensor !== null,
       relativeSeen: this.relativeSeen,
       heading: this.filter.value(Date.now())?.degrees ?? null,
     };
@@ -320,6 +398,9 @@ export class NavigationSensors {
     this.active = false; this.clearWatch(); this.clearLocationTimer(); this.filter.reset();
     if (this.headingTimer !== null) clearTimeout(this.headingTimer);
     this.headingTimer = null; this.headingSeen = false;
+    if (this.sensorTimer !== null) clearTimeout(this.sensorTimer);
+    this.sensorTimer = null;
+    this.stopOrientationSensor();
     if (this.timer !== null) clearInterval(this.timer);
     this.timer = null;
     window.removeEventListener('deviceorientation', this.orientation);
