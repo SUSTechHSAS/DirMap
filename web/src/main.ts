@@ -50,6 +50,8 @@ let pendingAnchor: Pixel | null = null;
 let anchors: Anchor[] = [];
 let follow = false, northOnly = false;
 let lastPosition: GeolocationPosition | null = null;
+/** When the last accepted geolocation sample was received (ms). */
+let lastPositionReceivedAt = 0;
 let selectedTeam: string | null = null;
 let busy = false;
 let courseId = new URLSearchParams(location.search).get('course');
@@ -104,6 +106,14 @@ if (import.meta.env.DEV || new URLSearchParams(location.search).has('e2e')) {
   };
 }
 
+const IN_APP_BROWSER = /MicroMessenger|WeChat|QQ\/|Weibo|AlipayClient/i.test(navigator.userAgent);
+function maybeInAppBrowserHint() {
+  if (!IN_APP_BROWSER) return;
+  const message = '当前在微信/QQ 等内嵌浏览器中，定位可能被禁用：请点右上角 ···，选择“在浏览器打开”';
+  $('sensor-status').textContent = message;
+  $('location-status').textContent = '内嵌浏览器可能禁用定位，请用系统浏览器打开';
+  notify(message);
+}
 function notify(message: string, error = false) {
   $('toast').textContent = message;
   $('toast').classList.remove('hidden');
@@ -604,7 +614,20 @@ $('plan-button').onclick = () => task(async () => {
   showPlan(result);
 });
 
-$('follow-button').onclick = async () => { if (courseSuperseded) { notify('旧路线已失效，请使用教师提供的新课程链接', true); return; } northOnly = false; follow = true; await sensors.start(); if (sensors.active) $('follow-label').textContent = '跟随已开启'; };
+$('follow-button').onclick = async () => {
+  if (courseSuperseded) { notify('旧路线已失效，请使用教师提供的新课程链接', true); return; }
+  northOnly = false; follow = true;
+  if (IN_APP_BROWSER) maybeInAppBrowserHint();
+  // Restart so a previous permission error / stalled watch can be retried.
+  if (sensors.active) sensors.stop();
+  $('location-status').textContent = '正在请求定位权限…';
+  $('follow-label').textContent = '正在开启定位…';
+  await sensors.start();
+  if (sensors.active) {
+    $('follow-label').textContent = '跟随已开启';
+    if (sensors.active && $('location-status').textContent === '正在请求定位权限…') $('location-status').textContent = '等待首次定位…';
+  } else $('follow-label').textContent = '定位未开启，点此重试';
+};
 $('north-button').onclick = () => { northOnly = true; campusMap.northUp(); $('compass-arrow').style.transform = 'rotate(0deg)'; $('sensor-status').textContent = '北向上 · 点击跟随按钮恢复朝向跟随'; };
 sensors.onHeading = (sample: HeadingSample | null) => {
   if (!sample) { if (sensors.active && !northOnly) $('sensor-status').textContent = '等待可靠朝向 · 可缓慢走动或校准罗盘'; return; }
@@ -612,11 +635,24 @@ sensors.onHeading = (sample: HeadingSample | null) => {
   if (!northOnly) $('sensor-status').textContent = `${sample.source === 'compass' ? sample.reference === 'true' ? '罗盘方向' : '罗盘方向（北向待校准）' : '行进方向'} ${Math.round(sample.degrees)}°${follow ? ' · 跟随中' : ' · 已暂停跟随'}`;
 };
 sensors.onPosition = position => {
-  lastPosition = position; campusMap.setLocation(position, follow);
-  $('location-status').textContent = `定位精度 ±${Math.round(position.coords.accuracy)} m`;
+  lastPosition = position; lastPositionReceivedAt = Date.now();
+  campusMap.setLocation(position, follow);
+  const accuracy = position.coords.accuracy;
+  $('location-status').textContent = Number.isFinite(accuracy) ? `定位精度 ±${Math.round(accuracy)} m` : '已定位（精度未知）';
+  $('follow-label').textContent = '跟随已开启';
   if (courseId) { renderStudent(); void updateNavigation(position); }
 };
-sensors.onStatus = message => { $('sensor-status').textContent = message; notify(message); };
+function browserHint(message: string): string {
+  return IN_APP_BROWSER && !message.includes('系统浏览器') ? `${message}（微信内嵌浏览器请点右上角 ··· 选择“在浏览器打开”）` : message;
+}
+let lastSensorNotice = '';
+sensors.onStatus = message => {
+  const text = browserHint(message);
+  $('sensor-status').textContent = text;
+  // Surface permission/unsupported states instead of only updating small text.
+  if (text !== lastSensorNotice) { lastSensorNotice = text; notify(text); }
+};
+sensors.onLocationStatus = message => { $('location-status').textContent = browserHint(message); };
 window.addEventListener('pagehide', () => { resumeSensors = sensors.active; sensors.stop(); });
 window.addEventListener('pageshow', event => { if (event.persisted && resumeSensors && !courseSuperseded) void sensors.start(); });
 
@@ -699,7 +735,7 @@ function renderStudent() {
   const next = index < 0 ? null : studentControls.find(control => control.id === route.controlIds[index]);
   $('student-progress').textContent = `${route.controlIds.filter(id => completed.has(id)).length} / ${route.controlIds.length}`;
   let metres: number | null = null;
-  if (next?.lnglat && lastPosition && Date.now() - lastPosition.timestamp < 15000) { const lat = next.lnglat[1] * Math.PI / 180; metres = Math.hypot((next.lnglat[0] - lastPosition.coords.longitude) * 111320 * Math.cos(lat), (next.lnglat[1] - lastPosition.coords.latitude) * 110700); }
+  if (next?.lnglat && lastPosition && Date.now() - lastPositionReceivedAt < 15000) { const lat = next.lnglat[1] * Math.PI / 180; metres = Math.hypot((next.lnglat[0] - lastPosition.coords.longitude) * 111320 * Math.cos(lat), (next.lnglat[1] - lastPosition.coords.latitude) * 110700); }
   $('next-control').innerHTML = next
     ? `<span class="next-label">目标 ${e(next.label)}</span><strong>${metres === null ? '等待定位' : `直线 ${distance(metres)}`}</strong><p>沿地图中的队伍路线前往</p>`
     : '<span class="next-label">所有目标已完成</span><strong>前往课程终点</strong><p>仍需按路线返回终点。</p>';
@@ -747,6 +783,7 @@ $('check-in').onclick = () => { if (courseSuperseded) return; const next = stude
 $('undo-check-in').onclick = () => { if (courseSuperseded) return; const last = [...completed].at(-1); if (last) { completed.delete(last); localStorage.setItem(progressKey(), JSON.stringify([...completed])); resetNavigation(); renderStudent(); } };
 
 async function boot() {
+  maybeInAppBrowserHint();
   const health = await loadHealth();
   sensors.declination = declinationFor(health);
   loadReference().then(data => campusMap.setReference(data)).catch(() => notify('校园参考暂不可用，正在显示在线底图'));

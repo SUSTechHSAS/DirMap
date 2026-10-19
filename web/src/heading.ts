@@ -86,6 +86,9 @@ export class NavigationSensors {
   filter = new HeadingFilter();
   private watch: number | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
+  private locationTimer: ReturnType<typeof setTimeout> | null = null;
+  private headingTimer: ReturnType<typeof setTimeout> | null = null;
+  private headingSeen = false;
   private startedAt = 0;
   active = false;
   declination: number | null = null;
@@ -95,6 +98,8 @@ export class NavigationSensors {
   onHeading: (sample: HeadingSample | null) => void = () => {};
   onPosition: (position: GeolocationPosition) => void = () => {};
   onStatus: (message: string) => void = () => {};
+  /** Location-specific status shown in the map's location line. */
+  onLocationStatus: (message: string) => void = () => {};
 
   private orientation = (event: DeviceOrientationEvent) => {
     if (document.hidden) return;
@@ -106,6 +111,11 @@ export class NavigationSensors {
       sample.degrees = normalize(sample.degrees + this.offset);
       if (this.calibrated) sample.reference = 'true';
       this.filter.push(sample, Date.now());
+      if (!this.headingSeen) {
+        this.headingSeen = true;
+        if (this.headingTimer !== null) clearTimeout(this.headingTimer);
+        this.headingTimer = null;
+      }
     }
   };
   private visibility = () => {
@@ -113,6 +123,7 @@ export class NavigationSensors {
     this.startedAt = Date.now();
     if (document.hidden) {
       this.clearWatch();
+      this.clearLocationTimer();
       this.onHeading(null);
     } else if (this.active) this.subscribeLocation();
   };
@@ -129,29 +140,75 @@ export class NavigationSensors {
     this.active = true;
     this.startedAt = Date.now();
     this.filter.reset();
-    window.addEventListener('deviceorientation', this.orientation);
-    window.addEventListener('deviceorientationabsolute', this.orientation as EventListener);
+    if (typeof window.DeviceOrientationEvent === 'undefined') {
+      this.onStatus('此浏览器不支持手机朝向，将仅使用 GPS 行进方向');
+    } else {
+      window.addEventListener('deviceorientation', this.orientation);
+      window.addEventListener('deviceorientationabsolute', this.orientation as EventListener);
+    }
     document.addEventListener('visibilitychange', this.visibility);
     this.subscribeLocation();
+    if (!this.headingTimer) {
+      this.headingTimer = setTimeout(() => {
+        if (!this.active || this.headingSeen) return;
+        this.onStatus('尚未收到罗盘数据：请允许“动作与方向”权限（iOS：设置 › Safari › 动作与方向访问），或在校准后使用行进方向');
+      }, 6000);
+    }
     this.timer = setInterval(() => { if (!document.hidden) this.onHeading(this.filter.value(Date.now())); }, 50);
   }
 
   private subscribeLocation() {
     this.clearWatch();
-    if (!navigator.geolocation) { this.onStatus('此浏览器没有定位接口'); return; }
+    this.clearLocationTimer();
+    if (!navigator.geolocation) {
+      const message = '此浏览器没有定位接口';
+      this.onStatus(message); this.onLocationStatus(message);
+      return;
+    }
+    this.onLocationStatus('正在获取位置…');
     this.watch = navigator.geolocation.watchPosition(position => {
-      if (!finite(position.timestamp) || position.timestamp > Date.now() + 250 || position.timestamp < this.startedAt || Date.now() - position.timestamp > 10000 ||
-          !finite(position.coords.latitude) || !finite(position.coords.longitude) || Math.abs(position.coords.latitude) > 90 || Math.abs(position.coords.longitude) > 180 ||
-          !finite(position.coords.accuracy) || position.coords.accuracy < 0) return;
-      this.onPosition(position);
-      const sample = courseSample(position.coords, position.timestamp);
-      if (sample) this.filter.push(sample, Date.now());
+      const receivedAt = Date.now();
+      const rawTimestamp = (position as GeolocationPosition).timestamp;
+      // Providers may timestamp the first fix slightly BEFORE the watch started
+      // (cached/emulated fixes, clock skew on iOS and embedded WebViews). Accept
+      // it instead of silently rejecting every fix and leaving the app at
+      // “位置尚未开启”. Only clearly stale or future samples are discarded.
+      const timestamp = finite(rawTimestamp) && rawTimestamp > 0 ? rawTimestamp : receivedAt;
+      if (timestamp > receivedAt + 5000 || receivedAt - timestamp > 60000) return;
+      if (!finite(position.coords.latitude) || !finite(position.coords.longitude) ||
+          Math.abs(position.coords.latitude) > 90 || Math.abs(position.coords.longitude) > 180) return;
+      const accuracy = position.coords.accuracy;
+      if (finite(accuracy) && (accuracy < 0 || accuracy > 10000)) return;
+      this.clearLocationTimer();
+      try { this.onPosition(position); } catch { /* never break the geolocation stream for UI errors */ }
+      const sample = courseSample(position.coords, timestamp);
+      if (sample) this.filter.push(sample, receivedAt);
       else this.filter.course = null;
-    }, error => this.onStatus(error.code === 1 ? '定位权限未开启，请在浏览器设置中允许' : '暂未获取可靠位置，请移至开阔区域'),
-    { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 });
+    }, error => {
+      const message = error.code === 1 ? '定位权限被拒绝：请在浏览器设置中允许定位后重试'
+        : error.code === 3 ? '定位超时：请到开阔区域后重试'
+        : '暂未获取可靠位置：请检查 GPS/网络后移至开阔区域';
+      this.onStatus(message); this.onLocationStatus(message);
+    }, { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 });
+    // Give the user an actionable message instead of an eternal
+    // “位置尚未开启” when the first fix takes long or the browser blocks it.
+    this.locationTimer = setTimeout(() => {
+      if (!this.active || this.watch === null) return;
+      const message = '仍未收到位置：请允许定位、到开阔处重试，并使用系统浏览器打开（微信等内嵌浏览器可能禁用定位）';
+      this.onStatus(message); this.onLocationStatus(message);
+    }, 12000);
   }
 
-  private clearWatch() { if (this.watch !== null) navigator.geolocation.clearWatch(this.watch); this.watch = null; }
+  private clearLocationTimer() {
+    if (this.locationTimer !== null) clearTimeout(this.locationTimer);
+    this.locationTimer = null;
+  }
+
+  private clearWatch() {
+    if (this.watch !== null) navigator.geolocation.clearWatch(this.watch);
+    this.watch = null;
+    this.clearLocationTimer();
+  }
   calibrate(bearing: number, now = Date.now()) {
     if (!finite(bearing) || bearing < 0 || bearing >= 360) throw new Error('方位角须在 0–359° 之间');
     const sample = this.filter.compass;
@@ -161,7 +218,9 @@ export class NavigationSensors {
   }
   clearCalibration() { this.offset = 0; this.calibrated = false; this.filter.reset(); }
   stop() {
-    this.active = false; this.clearWatch(); this.filter.reset();
+    this.active = false; this.clearWatch(); this.clearLocationTimer(); this.filter.reset();
+    if (this.headingTimer !== null) clearTimeout(this.headingTimer);
+    this.headingTimer = null; this.headingSeen = false;
     if (this.timer !== null) clearInterval(this.timer);
     this.timer = null;
     window.removeEventListener('deviceorientation', this.orientation);
