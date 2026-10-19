@@ -522,3 +522,220 @@ If a gate needs a contract change, message the Lead before deviating.
 7. **Service worker:** graph bundles (`data/maps/<id>/graph.json`, `graph.bin.gz`,
    `costs`-adjacent data) are deliberately not precached/intercepted; only course JSON,
    overlay PNG and `health`/`reference`/`releases.json` use the offline cache.
+
+## Addendum C — full-feature static migration (client-side CV pipeline)
+
+User requirement (2026-10-19): **every feature must run on the web page**; a missing backend is not
+accepted as a reason to disable upload / recognition / registration / terrain refresh / anchor
+calibration / approach suggestions. The Python `dirmap` package stays the reference implementation
+and build-time baker; the browser gets a faithful TypeScript port executed with **opencv.js (WASM)**
+and **tesseract.js** (OCR). The baked data stays the default fast path; the client pipeline should be
+able to regenerate it (used as its golden reference).
+
+Non-goals / honest limits: large-class exact optimality proof still follows the requested time budget
+(same as Python's CP-SAT time limit; small courses remain proven-optimal), and cross-device course
+sharing still requires committing a release JSON (inherent to static hosting — replaced by the
+download-and-commit flow). These are compute/hosting properties, not disabled features.
+
+### C.0 Architecture & conventions
+
+- New modules: `web/src/cv.ts`, `web/src/vision.ts`, `web/src/image-registration.ts`,
+  `web/src/access.ts`, `web/src/processing.ts`, `web/src/workspace-store.ts`, plus Lead-owned
+  integration in `main.ts` / `data.ts` / `map.ts` / `editor.ts` / `types.ts`.
+- Processing runs on the **main thread** in async stages with progress callbacks (worker migration is a
+  later optimization; modules must stay worker-compatible: no DOM access except canvas decode helpers
+  that are isolated in `processing.ts`).
+- opencv.js (`@techstark/opencv-js` 4.11) is lazily loaded as a **classic script** from
+  `${BASE}vendor/opencv.js` (copied from `node_modules` by `tools/vendor-assets.mjs`, not committed);
+  in Node tests `cv.ts` imports the npm package directly. OCR uses `tesseract.js` with CDN assets by
+  default (`workerPath`/`corePath`/`langPath` can be overridden via define/env) and **must degrade
+  gracefully** to empty labels (`待核N`) when offline/CDN unavailable, exactly like the Python no-OCR
+  path.
+- Images: browser gives `RgbaImage = {data: Uint8ClampedArray(RGBA), width, height}`. Native scans:
+  fetch `data/maps/<id>/original.png` (new, lossless decode of the source JPEG made by the baker) and
+  decode via `createImageBitmap` + `OffscreenCanvas` (canvas path isolated in `processing.ts`).
+  Node tests decode `original.png` with `pngjs`. This removes JPEG-decoder variance between Python and
+  browser, so client results are comparable to the baked goldens.
+- `cv.ts` exposes a small typed surface (`CvModule = any` internally) and **plain-JS data returns**
+  (no Mat leaks): `loadOpenCV()`, `RgbaImage`, `matFromRgba`, `rgbaFromMat`, `rgbBytesFromMat`,
+  `grayFromRgba`, `matFromGray`, `withMats` scope/lifetime helper, `cvtColor`, channel split,
+  `morphology`, `dilate`, `erode`, `gaussianBlur`, `resize`, `threshold`, `distanceTransformL2`,
+  `connectedComponents(mask)`, `connectedComponentsWithStats(mask)`, `findContours(mask, mode)`,
+  `contourPoints`, `drawPolygons`/`fillPolygons`/`fillContours`, `line`/`circle`/`polylines`,
+  `approxPolyDP`, `contourArea`, `arcLength`, `pointPolygonTest`, `moments`, `minAreaRect`,
+  `minEnclosingCircle`, `convexHull`, `isContourConvex`, `boxFilterMean`, `inpaint`, `houghCircles`,
+  `houghLinesP`, `copyMakeBorder`, `remap`.
+- Pixel convention (x right, y down, native pixels) and the frame/local-metre convention are the same
+  as `types.ts`/`geometry.ts`. A client-processed map produces a normal `MapState` plus derived
+  artifacts so all existing UI (controls, overlay, terrain, editor, planning, publishing) works
+  unchanged.
+
+### C.1 `web/src/vision.ts` (owner: cv-port) — port of `dirmap/vision.py` + `symbols.py` + `overprint.py` + `ocr.py`
+
+Public API:
+```ts
+export interface RgbaImage { data: Uint8ClampedArray; width: number; height: number }
+export interface AnalysisSemantics { building; water; point_ink; vegetation; restricted; course_ink; uncertain_ink: Uint8Array } // 0/1
+export interface AnalysisResult {
+  width: number; height: number;
+  controls: AnalyzedControl[];              // ids c1.., labels 待核N unless OCR/symbol set them
+  features: RegionFeature[];                // {kind:'building'|'water'|'pitch', center, area, aspect, points, rectangularity?}
+  costsIndex: Uint8Array;                   // palette index: 0->0, 1->1, 2->1.5
+  costsPalette: [0, 1, 1.5];
+  blocked: Uint8Array;                      // 0/255
+  semantics: AnalysisSemantics;
+  statistics: { buildingCandidates; waterCandidates; controlCandidates; courseSymbolCandidates;
+                forbiddenPixelFraction; restoredCourseInkPixels; continuedBarrierPixels; ocr? };
+  warnings: string[];
+  terrainRgba: Uint8ClampedArray;           // W*H*4 visualization: blocked -> [221,66,67,125]
+  masks: { purple; water; building; green; dark_green; black; olive; course_text: Uint8Array };
+}
+export async function analyze(image: RgbaImage, options?: {
+  labeler?: (purple: Uint8Array, controls: AnalyzedControl[], textInk: Uint8Array) => Promise<OcrResult> | OcrResult;
+  progress?: (percent: number, message: string) => void;
+}): Promise<AnalysisResult>
+```
+Port order/behaviour exactly: `colour_masks`, `water_obstacles`, `region_features`, pitch detection
+(`minAreaRect` rectangularity), `detect_controls` (resize+threshold+Gaussian+distanceTransform+
+HoughCircles+ring refinement/quadrant checks+nested dedup+sort), `classify_course_symbols`
+(course_symbol radial profile/distanceTransform/triangle fitting/ring rule), OCR `label_controls`,
+`annotation_mask`, `purple_restrictions`, `restore` (inpaint NS + continue_barriers), terrain assembly
+(recovered masks, erosion/dilation roof rule, roof edge, hard mask, connected-component ≥4 px filter,
+costs/semantics/statistics/warnings). OCR module (`web/src/ocr.ts` or inside vision.ts) ports
+`ocr.py` using tesseract.js (digits whitelist, PSM 11/global + crops, TSV words → label/box/conf,
+eligibility/refresh rules, ambiguity handling); if tesseract/wasm/model unavailable return
+`{available:false, recognized:0}` and keep 待核 labels (never throw).
+Tests: `tests/client/vision.test.ts` (Node, pngjs + opencv.js, `labeler` disabled): for szu-1 and szu-2
+compare against `tests/fixtures/static/client-processing.json`: control count equal, nearest baked
+control ≤3 px, roles equal for symbols, radius rel error ≤15%, feature counts ±10%, blocked agreement at
+golden sample points ≥99.5%, forbiddenPixelFraction ±0.005, cost samples ≥99.5%. szu-3 heavy test behind
+`DIRMAP_HEAVY_TESTS=1`. Must finish szu-1+szu-2 in <180 s total in Node.
+
+### C.2 `web/src/image-registration.ts` (owner: registration-port) — port of `dirmap/registration.py`
+
+Public API:
+```ts
+export interface ReferenceFeature { id; kind:'building'|'water'|'pitch'; center: Pixel; area: number; aspect: number; points: Pixel[] } // local metres
+export interface AutoRegisterResult { registration: RegistrationData; quality: NonNullable<MapState['quality']>; }
+export async function autoRegister(features: RegionFeature[], reference: ReferenceFeature[], width: number, height: number,
+  options?: { progress?: (p, m) => void }): Promise<AutoRegisterResult>              // may throw Python Chinese messages
+export async function registerToMap(source: RegionFeature[], base: {features: RegionFeature[]; registration: RegistrationData; quality; id; sourceHash},
+  options?): Promise<AutoRegisterResult>                                            // cross-map fallback without SIFT: Matcher against base features projected to local; document/approximate SIFT transfer semantics
+export async function extendTransferBoundary(...): Promise<AutoRegisterResult>      // parity with Python when feasible
+export async function manualRegister(anchors: Anchor[]): Promise<AutoRegisterResult> // seeded custom RANSAC + regularized Delaunay mesh
+export function warpOverlay(image: RgbaImage, registration: RegistrationData, options?: {maxSide?: number; nearest?: boolean; }):
+  { rgba: Uint8ClampedArray; width: number; height: number; extent: [number,number,number,number] }
+export function projectControls(controls: Control[], registration: RegistrationData | null): void // sets lnglat/calibrated
+```
+Implement: principal_angle (moments), Matcher (initial water-seed candidates, matches with area/aspect
+errors, score), fit_affine as a **deterministic custom RANSAC** (seeded LCG; threshold semantics, refine
+on inliers via normal equations; must not throw when matrix valid), corner extraction (approxPolyDP),
+outline IoU (fillPoly), feature/partial corner matches, fit_observed_landmarks (object-grouped
+fit/validation split, dense solve), Registration mesh construction (Delaunay via own
+Bowyer–Watson/ear-clipping; regularized Laplacian dense solve; fold detection; convex boundary check;
+throw the same Chinese errors), forward via existing `geometry.ts` `Mesh` (mesh construction here,
+evaluation reuses Mesh), `warp_overlay` inverse sampling into EPSG:3857 (mercator/unmercator frame
+helpers; bulk inverse with a triangle bucket grid — can reuse/extend `geometry.ts` or implement locally;
+must produce the same extent and ≤1700 px long side, nearest variant ≤1200 px). No SIFT: implement
+`registerToMap` with Matcher against base-map features projected through the base registration (same
+feature kinds/area/aspect/angle logic); quality fields match MapState.quality shape, including
+`baseAssetId`/`inheritedGeographicP95M`/`validationScope`.
+Tests `tests/client/registration.test.ts`: Node, use vision analysis of `original.png` for szu-1;
+`autoRegister` against `web/public/data/reference-features.json`; compare baked state.json:
+all controls calibrated, fitCount within ±25%, p95 within ±2.5 m, control lnglat max distance from baked
+≤6 m; `manualRegister` with 5 synthetic anchors reproduces a known affine (error <0.5 m) and rejects
+collinear/conflicting anchors with the Python messages; `warpOverlay` extent/size sane and alpha nonzero.
+szu-2 cross-map transfer test (heavy, `DIRMAP_HEAVY_TESTS=1`): p95 ≤5 m or direct autoRegister fallback.
+
+### C.3 `web/src/access.ts` (owner: access-port) — port of `dirmap/access.py`
+
+Public API:
+```ts
+export interface AccessContext { graph: RasterGraph; mesh: MeshLike; semantics: AnalysisSemantics | BakedSemantics;
+  edits?: TerrainEdit[]; closedEdits?: Uint8Array }
+export function resolveApproaches(context: AccessContext, controls: Control[], options?: { startComponent?: number }):
+  Record<string, BakedApproach>
+```
+Full port: `_components` (water morphology close 5x5 + connectedComponentsWithStats), `_feature` (per
+kind ring/roof/water edge candidate rules incl. compound symbols and small water features), `_inFeature`,
+`_overSymbol`, `_complete_outline` (recover symbol rim, never a connected wall), `_ink_feature`,
+`_stroke_component`, `resolve` (snap exact/component → approach features → candidate sampling with
+segmentPixels/symbol mask/restricted/closed checks → local-side ambiguity via connectivity →
+required_component filter → offsets). Must return exactly `BakedApproach` entries (ok/error with the
+Python Chinese messages) so `planner.ts` consumes them unchanged.
+Dependencies requested from routing-core (task-5): `RasterGraph` built from raster, `queryNodesNear(nodeOrPixel, radius)`,
+`pixels/local/components/componentCount/nearestNode` access, `segmentPixels`, `clearSegment`, `snap`,
+optional `closedEdits`; `Mesh` from geometry.ts.
+Tests `tests/client/access.test.ts`: load baked graph via test seam + `semantics.bin.gz` from
+`web/public/data/maps/<id>/`; baked state controls: every baked ok entry resolves ok with local position
+within 2 m (or identical node) and same automatic flag; szu-2 c2/c7 return the exact baked error
+messages; szu-1 c6 resolves as automatic non-exact with offset ≤8 m (compound-point-symbol path);
+edited-closed location is refused.
+
+### C.4 routing-core changes (task-5)
+- `buildGraphFromRaster(costs: Float32Array, registration: RegistrationData, sourceHash: string, edits: TerrainEdit[], step=4): RasterGraph`
+  — full client-side port of `dirmap/graph.py::build_graph`/`_quadtree_graph` for arbitrary costs and
+  registration: domain = convex hull of `registration.source` filled + 3x3 erosion + simplex boundary
+  repair (use Mesh.forwardMany for inside), padded quadtree decomposition, node validity filter,
+  4-direction canonical CSR, components, content hash (`${bakedHash}` style: sha256 is async in browser;
+  use a stable synchronous hash string, e.g. `client-<hex16>` for client-built graphs, and expose
+  `metadata.graphHash`). Golden test: rebuilding from the baked `terrain.npz` costs+registration must
+  reproduce the baked nodeCount/directedEdgeCount/componentCount and the same 40 Dijkstra samples within
+  spec tolerances (proves the port).
+- `RasterGraph` additions: `queryNodesNear(point: Pixel, maxDistancePx: number): number[]` (owner-grid/KD
+  candidates), `nearestNodeIndex` helpers, `closedEdits?: Uint8Array`, constructor from arrays,
+  `metadata.graphHash` override for client graphs, `pixels/local/components` already public.
+- `createPlannerFromGraph(graph: RasterGraph, approaches: BakedApproaches, state: MapState): Planner`
+  (plan/navigate without fetching baked bundles; used by `processing.ts`/main for client maps) and
+  `getPlanner(state, progress?, assets?)` unchanged. Planner cache must key client graphs by
+  `graph.metadata.graphHash`.
+- Keep all existing golden tests green; add `tests/static/routing-raster-build.test.ts`.
+
+### C.5 bake-data additions (task-6)
+- `maps/<id>/original.png`: cv2 decode of the repo-root JPEG, PNG-compressed (exact pixels the Python
+  pipeline saw). ~3.6/0.8/7.2 MB.
+- `maps/<id>/semantics.bin.gz`: magic `DMSEM1`, uint16 version, uint32 width/height, uint8 maskCount,
+  names UTF-8 length-prefixed list (`building,water,point_ink,vegetation,restricted`), bit-packed masks
+  row-major LSB-first; for access tests. (Do not include costs; those come from graph.bin.gz.)
+- `reference-features.json`: `{frame, features:[{id,kind,center,area,aspect,points}]}` from
+  `dirmap.reference.load_reference` (local-metre coordinates; only building/water/pitch).
+- `tests/fixtures/static/client-processing.json`: per map `{assetId,width,height,controls:[{label,role,pixel,radiusPx,state}],
+  featureCounts, statistics, forbiddenPixelFraction, blockedSamples:[{x,y,v}×3000 deterministic], costsSamples:[{x,y,v}×2000]}`.
+- Update `verify_static_data.py` for the new files (PNG dimensions and sha256 from source JPG decode,
+  semantics unpack matches terrain.npz masks at sampled pixels, reference features valid, golden sample
+  counts, sizes/determinism) and rerun the full bake + verifier.
+
+### C.6 Lead integration (`processing.ts`, `workspace-store.ts`, UI, main.ts)
+- `processing.ts` orchestrates: `processMap(input, progress)` → analyze (or reuse for terrain mode) →
+  autoRegister/registerToMap/manualRegister → projectControls → buildGraphFromRaster →
+  resolveApproaches → generate overlay + terrain-warp rasters (via image-registration warp) → assemble
+  `MapState` (version bump, `static:false`, `sourceKind:'processed'|'upload'|'terrain'`, warnings/
+  statistics) with derived artifacts and client graph hash; returns everything needed for persistence
+  and planning.
+- `workspace-store.ts` (IndexedDB): per assetId store original image Blob, processed state JSON,
+  costs, semantics (gzip via CompressionStream), overlay/terrain PNG Blobs, approaches JSON, catalog
+  entries for uploads, and metadata (`kind`, timestamps). Provide `getLocalMap/putLocalMap/deleteLocalMap/
+  listLocalMaps/objectUrl(assetId, file)`.
+- `main.ts` UI: restore upload + 自动识别与配准 + 处理三图 + 更新通行识别 + 同名点校准/独立核查/重新校准
+  buttons with progress and busy guards; catalog merges baked + local maps; `loadState` returns local
+  processed state when present; "恢复构建时数据" clears local processing (falls back to baked);
+  publishing uses the client planner/graphHash; map/editor images use object URLs for local assets.
+- `data.ts`: add `loadOriginalPng(assetId)` (baked) / `loadReferenceFeatures()`; `mapAssetUrl` remains
+  for baked assets; local maps resolve via workspace-store object URLs.
+- `tools/vendor-assets.mjs` + `prepare`/`prebuild` npm scripts to copy `opencv.js` into
+  `web/public/vendor/` (gitignored) for the classic-script loader; document sizes/lazy-load behaviour.
+- package.json: add `@techstark/opencv-js`, `tesseract.js` deps, `pngjs` dev dep; update tests globs
+  (`tests/client/*.test.ts`).
+- Docs: README/DEPLOY remove the "not supported in static build" list and document the client pipeline,
+  lazy WASM/OCR assets, performance expectations, and the only remaining static-hosting limits.
+
+### C.7 Verification gates
+1. `npx tsc --noEmit` green.
+2. `npm test` (existing 48 + new client tests) green; vision/registration/access goldens as above;
+   browser E2E extended: reprocess szu-1 (or szu-2) through the real UI and compare rendered controls/
+   quality to baked goldens; upload a bundled map as a new sheet and get routes; terrain refresh;
+   anchor calibration flow; publish a client-processed course and navigate it.
+3. Bake determinism + `verify_static_data.py` green with new files.
+4. Total initial JS payload unchanged (WASM/OCR lazy); reprocessing flow shows progress and never freezes
+   silently; documented timings measured in Chromium.
+5. Update README/DEPLOY verification tables and limitations.

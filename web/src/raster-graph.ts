@@ -8,6 +8,7 @@
  * set, so edited graphs re-run the quadtree decomposition locally.
  */
 import { Mesh } from './geometry.ts';
+import type { RegistrationData } from './geometry.ts';
 import type { MapState, Pixel, PlannerProgress, TerrainEdit } from './types.ts';
 
 export type Metric = 'time' | 'distance';
@@ -73,6 +74,7 @@ interface GraphData {
   lengths: Float32Array;
   components: Uint32Array;
   componentCount: number;
+  closedEdits: Uint8Array | null;
 }
 
 interface EdgeArrays {
@@ -81,6 +83,8 @@ interface EdgeArrays {
   weights: Float32Array;
   lengths: Float32Array;
   pairCount: number;
+  lengthSum: number;
+  weightSum: number;
 }
 
 /** NumPy `np.rint`: round half to even. */
@@ -243,6 +247,8 @@ function buildEdgeArrays(
   const weights = new Float32Array(total);
   const lengths = new Float32Array(total);
   const cursor = indptr.slice(0, nodeCount);
+  let lengthSum = 0;
+  let weightSum = 0;
   for (let i = 0; i < uniqueCount; i++) {
     const key = keys[i];
     const a = Math.floor(key / count);
@@ -255,6 +261,8 @@ function buildEdgeArrays(
     const numerator = Math.fround(Math.fround(terrain[a] * sizeA) + Math.fround(terrain[b] * sizeB));
     const ratio = Math.fround(numerator / Math.fround(sizeA + sizeB));
     const weight = length * ratio;
+    lengthSum += length;
+    weightSum += weight;
     let position = cursor[a]++;
     indices[position] = b;
     lengths[position] = length;
@@ -264,7 +272,7 @@ function buildEdgeArrays(
     lengths[position] = length;
     weights[position] = weight;
   }
-  return { indptr, indices, weights, lengths, pairCount: uniqueCount };
+  return { indptr, indices, weights, lengths, pairCount: uniqueCount, lengthSum, weightSum };
 }
 
 function buildComponents(indptr: Uint32Array, indices: Uint32Array, nodeCount: number): { components: Uint32Array; componentCount: number } {
@@ -394,9 +402,18 @@ interface NodeGridIndex {
   entries: Uint32Array;
 }
 
-/** Re-rasterize teacher edits onto the baked costs (`open` -> cost, `close` -> 0). */
-function applyEdits(costs: Float32Array, width: number, height: number, edits: TerrainEdit[]): void {
-  const fillCircle = (cx: number, cy: number, radius: number, value: number): void => {
+/** Client-build routing schema (mirrors `dirmap/schemas.json`). */
+export const CLIENT_ROUTING_SCHEMA = 'native-quadtree-v4-roof-palette';
+
+/** Rasterize teacher terrain edits (`open` -> cost, `close` -> 0) and return
+ * the `closed_edits` mask Python's AccessResolver reads.
+ *
+ * cv2.circle/cv2.polylines are approximated (the edit strokes are teacher
+ * corrections, never a baked golden); blocked pixels are never opened and the
+ * closed mask is exact for the same approximation. */
+function applyEdits(costs: Float32Array, width: number, height: number, edits: TerrainEdit[]): Uint8Array {
+  const closedEdits = new Uint8Array(width * height);
+  const fillCircle = (cx: number, cy: number, radius: number, value: number, closed: number): void => {
     const x0 = Math.max(0, cx - radius);
     const x1 = Math.min(width - 1, cx + radius);
     const y0 = Math.max(0, cy - radius);
@@ -407,11 +424,14 @@ function applyEdits(costs: Float32Array, width: number, height: number, edits: T
       for (let x = x0; x <= x1; x++) {
         const dx = x - cx;
         const dy = y - cy;
-        if (dx * dx + dy * dy <= radiusSquared) costs[row + x] = value;
+        if (dx * dx + dy * dy <= radiusSquared) {
+          costs[row + x] = value;
+          if (closed) closedEdits[row + x] = 1;
+        }
       }
     }
   };
-  const fillSegment = (ax: number, ay: number, bx: number, by: number, radius: number, value: number): void => {
+  const fillSegment = (ax: number, ay: number, bx: number, by: number, radius: number, value: number, closed: number): void => {
     const x0 = Math.max(0, Math.min(ax, bx) - radius);
     const x1 = Math.min(width - 1, Math.max(ax, bx) + radius);
     const y0 = Math.max(0, Math.min(ay, by) - radius);
@@ -430,7 +450,10 @@ function applyEdits(costs: Float32Array, width: number, height: number, edits: T
         }
         const px = x - (ax + t * dx);
         const py = y - (ay + t * dy);
-        if (px * px + py * py <= radiusSquared) costs[row + x] = value;
+        if (px * px + py * py <= radiusSquared) {
+          costs[row + x] = value;
+          if (closed) closedEdits[row + x] = 1;
+        }
       }
     }
   };
@@ -448,47 +471,279 @@ function applyEdits(costs: Float32Array, width: number, height: number, edits: T
     const value = edit.kind === 'close' ? 0 : Number(edit.cost ?? 1);
     const radius = Math.trunc(Number(edit.radiusPx ?? 6));
     if (!(radius >= 1 && radius <= 100) || !(value >= 0) || !Number.isFinite(value)) throw new Error('通行修正无效');
+    const closed = edit.kind === 'close' ? 1 : 0;
     if (points.length === 1) {
-      fillCircle(points[0][0], points[0][1], radius, value);
+      fillCircle(points[0][0], points[0][1], radius, value, closed);
     } else {
       for (let i = 0; i + 1 < points.length; i++) {
-        fillSegment(points[i][0], points[i][1], points[i + 1][0], points[i + 1][1], radius, value);
+        fillSegment(points[i][0], points[i][1], points[i + 1][0], points[i + 1][1], radius, value, closed);
       }
-      for (const point of [points[0], points[points.length - 1]]) fillCircle(point[0], point[1], radius, value);
+      for (const point of [points[0], points[points.length - 1]]) fillCircle(point[0], point[1], radius, value, closed);
+    }
+  }
+  return closedEdits;
+}
+
+/** cv2.convexHull on float32 image points: hull vertices (no collinear points). */
+function convexHullFloat32(points: readonly Pixel[]): Pixel[] {
+  const rounded: Pixel[] = points.map(point => [Math.fround(point[0]), Math.fround(point[1])]);
+  const sorted = rounded.slice().sort((left, right) => left[0] - right[0] || left[1] - right[1]);
+  const cross = (origin: Pixel, first: Pixel, second: Pixel): number =>
+    (first[0] - origin[0]) * (second[1] - origin[1]) - (first[1] - origin[1]) * (second[0] - origin[0]);
+  const lower: Pixel[] = [];
+  for (const point of sorted) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], point) <= 0) lower.pop();
+    lower.push(point);
+  }
+  const upper: Pixel[] = [];
+  for (let index = sorted.length - 1; index >= 0; index--) {
+    const point = sorted[index];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], point) <= 0) upper.pop();
+    upper.push(point);
+  }
+  lower.pop();
+  upper.pop();
+  return lower.concat(upper);
+}
+
+/** Pixel-perfect port of OpenCV `LineIterator` (8-connected, left-to-right). */
+function drawLine8(mask: Uint8Array, width: number, height: number, from: Pixel, to: Pixel): void {
+  let x1 = from[0];
+  let y1 = from[1];
+  const x2 = to[0];
+  const y2 = to[1];
+  let dx = x2 - x1;
+  let dy = y2 - y1;
+  let deltaX = 1;
+  let deltaY = 1;
+  if (dx < 0) {
+    dx = -dx;
+    dy = -dy;
+    x1 = x2;
+    y1 = y2;
+  }
+  if (dy < 0) {
+    dy = -dy;
+    deltaY = -1;
+  }
+  const vertical = dy > dx;
+  if (vertical) {
+    const swap = dx;
+    dx = dy;
+    dy = swap;
+    const swapDelta = deltaX;
+    deltaX = deltaY;
+    deltaY = swapDelta;
+  }
+  let err = dx - 2 * dy;
+  const plusDelta = 2 * dx;
+  const minusDelta = -2 * dy;
+  let minusShift = deltaX;
+  let plusShift = 0;
+  let minusStep = 0;
+  let plusStep = deltaY;
+  if (vertical) {
+    const swapStep = plusStep;
+    plusStep = plusShift;
+    plusShift = swapStep;
+    const swapMinus = minusStep;
+    minusStep = minusShift;
+    minusShift = swapMinus;
+  }
+  let x = x1;
+  let y = y1;
+  const count = dx + 1;
+  for (let index = 0; index < count; index++) {
+    if (x >= 0 && x < width && y >= 0 && y < height) mask[y * width + x] = 1;
+    if (index + 1 >= count) break;
+    if (err < 0) {
+      err += minusDelta + plusDelta;
+      x += plusShift + minusShift;
+      y += plusStep + minusStep;
+    } else {
+      err += minusDelta;
+      x += minusShift;
+      y += minusStep;
     }
   }
 }
 
-/** Local quadtree re-decomposition used only when teacher edits change the costs. */
-function quadtreeCells(
-  costs: Float32Array, mesh: Mesh, width: number, height: number, step: number,
-): { pixels: Float64Array; sizes: Uint8Array; terrain: Float32Array; owner: Int32Array; count: number } {
-  if ((step & (step - 1)) !== 0 || step < 1 || step > 16) throw new Error('自适应网格步长必须是 1、2、4、8 或 16');
-  const owners = new Int32Array(width * height).fill(-1);
+/** Pixel-perfect port of OpenCV `fillConvexPoly` (shift=0, LINE_8). */
+function fillConvexPolyMask(width: number, height: number, points: Pixel[]): Uint8Array {
+  const mask = new Uint8Array(width * height);
+  const npts = points.length;
+  if (npts < 3) return mask;
+  for (let index = 0; index < npts; index++) drawLine8(mask, width, height, points[index], points[(index + 1) % npts]);
+  const XY_SHIFT = 16;
+  const XY_ONE = 1 << XY_SHIFT;
+  const delta1 = XY_ONE >> 1;
+  let imin = 0;
+  let ymin = points[0][1];
+  let ymax = points[0][1];
+  let xmin = points[0][0];
+  let xmax = points[0][0];
+  for (let index = 0; index < npts; index++) {
+    const point = points[index];
+    if (point[1] < ymin) {
+      ymin = point[1];
+      imin = index;
+    }
+    if (point[1] > ymax) ymax = point[1];
+    if (point[0] > xmax) xmax = point[0];
+    if (point[0] < xmin) xmin = point[0];
+  }
+  if (xmax < 0 || ymax < 0 || xmin >= width || ymin >= height) return mask;
+  ymax = Math.min(ymax, height - 1);
+  const edge = [
+    { idx: imin, di: 1, x: -XY_ONE, dx: 0, ye: ymin },
+    { idx: imin, di: npts - 1, x: -XY_ONE, dx: 0, ye: ymin },
+  ];
+  let edges = npts;
+  let y = ymin;
+  do {
+    for (let index = 0; index < 2; index++) {
+      if (y >= edge[index].ye) {
+        let idx0 = edge[index].idx;
+        const di = edge[index].di;
+        let idx = idx0 + di;
+        if (idx >= npts) idx -= npts;
+        while (edges-- > 0) {
+          const ty = points[idx][1];
+          if (ty > y) {
+            const xs = points[idx0][0] << XY_SHIFT;
+            const xe = points[idx][0] << XY_SHIFT;
+            edge[index].ye = ty;
+            edge[index].dx = Math.trunc(((xe - xs) * 2 + (ty - y)) / (2 * (ty - y)));
+            edge[index].x = xs;
+            edge[index].idx = idx;
+            break;
+          }
+          idx0 = idx;
+          idx += di;
+          if (idx >= npts) idx -= npts;
+        }
+      }
+    }
+    if (edges < 0) break;
+    if (y >= 0) {
+      const left = edge[0].x > edge[1].x ? 1 : 0;
+      const right = 1 - left;
+      let xx1 = (edge[left].x + delta1) >> XY_SHIFT;
+      let xx2 = (edge[right].x + delta1) >> XY_SHIFT;
+      if (xx2 >= 0 && xx1 < width) {
+        if (xx1 < 0) xx1 = 0;
+        if (xx2 >= width) xx2 = width - 1;
+        const row = y * width;
+        for (let x = xx1; x <= xx2; x++) mask[row + x] = 1;
+      }
+    }
+    edge[0].x += edge[0].dx;
+    edge[1].x += edge[1].dx;
+  } while (++y <= ymax);
+  return mask;
+}
+
+/** cv2.erode with a 3x3 box and the morphology border value (outside = max). */
+function erode3x3Mask(mask: Uint8Array, width: number, height: number): Uint8Array {
+  const result = new Uint8Array(width * height);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let value = 1;
+      for (let dy = -1; dy <= 1 && value; dy++) {
+        const yy = y + dy;
+        if (yy < 0 || yy >= height) continue;
+        const row = yy * width;
+        for (let dx = -1; dx <= 1; dx++) {
+          const xx = x + dx;
+          if (xx < 0 || xx >= width) continue;
+          if (!mask[row + xx]) {
+            value = 0;
+            break;
+          }
+        }
+      }
+      result[y * width + x] = value;
+    }
+  }
+  return result;
+}
+
+/**
+ * Python `_quadtree_graph` registration domain: rounded convex hull of the
+ * registration source points filled with cv2 semantics, eroded by 3x3, then
+ * repaired on the eroded border with the Delaunay simplex test.
+ */
+export function rasterDomainMask(registration: RegistrationData, width: number, height: number, mesh?: Mesh): Uint8Array {
+  const hull = convexHullFloat32(registration.source ?? []);
+  const rounded = hull.map(point => [rintEven(point[0]), rintEven(point[1])] as Pixel);
+  const filled = fillConvexPolyMask(width, height, rounded);
+  const eroded = erode3x3Mask(filled, width, height);
+  const ringX: number[] = [];
+  const ringY: number[] = [];
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (filled[y * width + x] && !eroded[y * width + x]) {
+        ringX.push(x);
+        ringY.push(y);
+      }
+    }
+  }
+  if (!ringX.length) return filled;
+  const ring = new Float64Array(ringX.length * 2);
+  for (let index = 0; index < ringX.length; index++) {
+    ring[index * 2] = ringX[index];
+    ring[index * 2 + 1] = ringY[index];
+  }
+  const inside = (mesh ?? new Mesh(registration)).forwardMany(ring).inside;
+  for (let index = 0; index < ringX.length; index++) {
+    filled[ringY[index] * width + ringX[index]] = inside[index] ? 1 : 0;
+  }
+  return filled;
+}
+
+interface QuadtreeResult {
+  pixels: Float64Array;
+  sizes: Uint8Array;
+  terrain: Float32Array;
+  owner: Int32Array;
+  paddedWidth: number;
+  count: number;
+}
+
+/** Python `_quadtree_graph` decomposition: padded step -> 1 homogeneous tiles. */
+function decomposeQuadtree(domain: Uint8Array, costs: Float32Array, width: number, height: number, step: number): QuadtreeResult {
+  const paddedWidth = Math.ceil(width / step) * step;
+  const paddedHeight = Math.ceil(height / step) * step;
+  const padded = new Float32Array(paddedWidth * paddedHeight);
+  for (let y = 0; y < height; y++) {
+    const sourceRow = y * width;
+    const targetRow = y * paddedWidth;
+    for (let x = 0; x < width; x++) if (domain[sourceRow + x]) padded[targetRow + x] = costs[sourceRow + x];
+  }
+  const owner = new Int32Array(paddedWidth * paddedHeight).fill(-1);
   const centreXs: number[] = [];
   const centreYs: number[] = [];
   const cellSizes: number[] = [];
   const terrainValues: number[] = [];
   let count = 0;
   for (let size = step; size >= 1; size >>= 1) {
-    const tileCols = Math.floor(width / size);
-    const tileRows = Math.floor(height / size);
+    const tileCols = paddedWidth / size;
+    const tileRows = paddedHeight / size;
     for (let tileY = 0; tileY < tileRows; tileY++) {
       const y0 = tileY * size;
       for (let tileX = 0; tileX < tileCols; tileX++) {
         const x0 = tileX * size;
-        const firstRow = y0 * width + x0;
-        const first = costs[firstRow];
-        if (!(first > 0) || owners[firstRow] >= 0) continue;
+        const first = padded[y0 * paddedWidth + x0];
+        if (!(first > 0) || owner[y0 * paddedWidth + x0] >= 0) continue;
         let fresh = true;
         for (let yy = 0; yy < size && fresh; yy++) {
-          const row = (y0 + yy) * width + x0;
+          const row = (y0 + yy) * paddedWidth + x0;
           for (let xx = 0; xx < size; xx++) {
-            if (owners[row + xx] >= 0) {
+            if (owner[row + xx] >= 0) {
               fresh = false;
               break;
             }
-            const value = costs[row + xx];
+            const value = padded[row + xx];
             if (!(value > 0) || Math.abs(value - first) >= 1e-6) {
               fresh = false;
               break;
@@ -497,7 +752,7 @@ function quadtreeCells(
         }
         if (!fresh) continue;
         const id = count++;
-        for (let yy = 0; yy < size; yy++) owners.fill(id, (y0 + yy) * width + x0, (y0 + yy) * width + x0 + size);
+        for (let yy = 0; yy < size; yy++) owner.fill(id, (y0 + yy) * paddedWidth + x0, (y0 + yy) * paddedWidth + x0 + size);
         centreXs.push(x0 + (size - 1) / 2);
         centreYs.push(y0 + (size - 1) / 2);
         cellSizes.push(size);
@@ -506,39 +761,240 @@ function quadtreeCells(
     }
   }
   if (count < 2) throw new Error('配准范围内没有足够可通行区域');
-  let pixels = new Float64Array(count * 2);
-  for (let i = 0; i < count; i++) {
-    pixels[i * 2] = centreXs[i];
-    pixels[i * 2 + 1] = centreYs[i];
+  const pixels = new Float64Array(count * 2);
+  for (let index = 0; index < count; index++) {
+    pixels[index * 2] = centreXs[index];
+    pixels[index * 2 + 1] = centreYs[index];
   }
+  return {
+    pixels,
+    sizes: Uint8Array.from(cellSizes),
+    terrain: Float32Array.from(terrainValues),
+    owner,
+    paddedWidth,
+    count,
+  };
+}
+
+/** Canonical text used for deterministic client/edit graph hashes. */
+function editsCanonical(edits: readonly TerrainEdit[]): string {
+  return edits.map(edit => `${edit.kind}|${Number(edit.radiusPx ?? 6)}|${edit.kind === 'close' ? 0 : Number(edit.cost ?? 1)}|` +
+    (edit.pixels ?? []).map(point => `${point[0]},${point[1]}`).join(';')).join('/');
+}
+
+/** Deterministic synchronous hash of every client-graph input. */
+function clientGraphHash(
+  sourceHash: string, registration: RegistrationData, edits: readonly TerrainEdit[],
+  costs: Float32Array, step: number, width: number, height: number,
+): string {
+  let first = 0x811c9dc5;
+  let second = 0x7f4a7c15;
+  const mixText = (text: string): void => {
+    for (let index = 0; index < text.length; index++) {
+      const code = text.charCodeAt(index);
+      first = Math.imul(first ^ code, 0x01000193) >>> 0;
+      second = Math.imul(second + code, 0x85ebca6b) >>> 0;
+    }
+  };
+  const mixNumber = (value: number): void => {
+    mixText(String(value));
+  };
+  mixText(sourceHash);
+  mixText(`|${width}x${height}|${step}|${editsCanonical(edits)}|`);
+  const affine = registration.affine ?? [];
+  for (const row of affine) for (const value of row) mixNumber(value);
+  for (const point of registration.source ?? []) {
+    mixNumber(point[0]);
+    mixNumber(point[1]);
+  }
+  for (const point of registration.target ?? []) {
+    mixNumber(point[0]);
+    mixNumber(point[1]);
+  }
+  for (const triangle of registration.triangles ?? []) for (const value of triangle) mixNumber(value);
+  const words = new Uint32Array(costs.buffer, costs.byteOffset, costs.length);
+  for (let index = 0; index < words.length; index++) {
+    first = Math.imul(first ^ words[index], 0x01000193) >>> 0;
+    second = Math.imul(second ^ (words[index] >>> 15), 0x85ebca6b) >>> 0;
+  }
+  const hex = (value: number): string => value.toString(16).padStart(8, '0');
+  return `client-${hex(first)}${hex(second)}`;
+}
+
+/** Build the owner grid from leaf centres/sizes (owner ids start at 0). */
+function buildOwnerGrid(pixels: Float64Array, sizes: Uint8Array, nodeCount: number, width: number, height: number): Uint32Array {
+  const owner = new Uint32Array(width * height).fill(NO_OWNER);
+  for (let node = 0; node < nodeCount; node++) {
+    const size = sizes[node];
+    const x0 = rintEven(pixels[node * 2] - (size - 1) / 2);
+    const y0 = rintEven(pixels[node * 2 + 1] - (size - 1) / 2);
+    for (let row = 0; row < size; row++) {
+      const start = (y0 + row) * width + x0;
+      owner.fill(node, start, start + size);
+    }
+  }
+  return owner;
+}
+
+interface AssembledArrays {
+  local: Float64Array;
+  owner: Uint32Array;
+  edges: EdgeArrays;
+  components: { components: Uint32Array; componentCount: number };
+}
+
+function assembleArrays(
+  mesh: Mesh, pixels: Float64Array, sizes: Uint8Array, terrain: Float32Array,
+  width: number, height: number,
+): AssembledArrays {
+  const nodeCount = sizes.length;
   const forward = mesh.forwardMany(pixels);
-  let sizes = Uint8Array.from(cellSizes);
-  let terrain = Float32Array.from(terrainValues);
+  const owner = buildOwnerGrid(pixels, sizes, nodeCount, width, height);
+  const edges = buildEdgeArrays(owner, nodeCount, width, height, forward.local, sizes, terrain);
+  const components = buildComponents(edges.indptr, edges.indices, nodeCount);
+  return { local: forward.local, owner, edges, components };
+}
+
+export interface RasterBuildOptions {
+  width?: number;
+  height?: number;
+  assetId?: string;
+  schema?: string;
+  graphHash?: string;
+}
+
+/**
+ * Full browser port of `dirmap/graph.py::build_graph`/`_quadtree_graph` for
+ * arbitrary costs and registration (used by client-processed maps and for
+ * rebuilding edited baked maps).
+ */
+export function buildGraphFromRaster(
+  costs: Float32Array,
+  registration: RegistrationData,
+  sourceHash: string,
+  edits: TerrainEdit[] = [],
+  step = 4,
+  options: RasterBuildOptions = {},
+): RasterGraph {
+  const width = options.width ?? registration.width;
+  const height = options.height ?? registration.height;
+  if (width === undefined || height === undefined) throw new Error('缺少通行图尺寸');
+  if (!Number.isInteger(width) || !Number.isInteger(height)) throw new Error('缺少通行图尺寸');
+  if (width < 1 || height < 1 || costs.length !== width * height) throw new Error('通行图尺寸无效');
+  if (!Array.isArray(edits)) edits = [];
+  const editedCosts = new Float32Array(costs);
+  const closedEdits = edits.length ? applyEdits(editedCosts, width, height, edits) : null;
+  if (!Number.isInteger(step) || step < 1 || step > 16) throw new Error('通行网格步长无效');
+  if ((step & (step - 1)) !== 0) throw new Error('自适应网格步长必须是 1、2、4、8 或 16');
+  const mesh = new Mesh(registration);
+  if (!mesh.hasMesh) throw new Error('缺少有效配准范围');
+  const domain = rasterDomainMask(registration, width, height, mesh);
+  const cells = decomposeQuadtree(domain, editedCosts, width, height, step);
+  const forward = mesh.forwardMany(cells.pixels);
+  let pixels = cells.pixels;
+  let sizes = cells.sizes;
+  let terrain = cells.terrain;
+  let local = forward.local;
+  let nodeCount = cells.count;
+  const owner = cells.owner;
   let validCount = 0;
-  for (let i = 0; i < count; i++) if (forward.inside[i]) validCount++;
-  if (validCount !== count) {
-    const mapping = new Int32Array(count).fill(-1);
+  for (let node = 0; node < nodeCount; node++) if (forward.inside[node]) validCount++;
+  if (validCount !== nodeCount) {
+    const mapping = new Int32Array(nodeCount).fill(-1);
     let next = 0;
-    for (let i = 0; i < count; i++) if (forward.inside[i]) mapping[i] = next++;
-    if (next < 2) throw new Error('配准范围内没有足够可通行区域');
-    for (let i = 0; i < owners.length; i++) if (owners[i] >= 0) owners[i] = mapping[owners[i]];
+    for (let node = 0; node < nodeCount; node++) if (forward.inside[node]) mapping[node] = next++;
+    for (let index = 0; index < owner.length; index++) if (owner[index] >= 0) owner[index] = mapping[owner[index]];
     const compactPixels = new Float64Array(next * 2);
     const compactSizes = new Uint8Array(next);
     const compactTerrain = new Float32Array(next);
-    for (let i = 0; i < count; i++) {
-      const mapped = mapping[i];
-      if (mapped < 0) continue;
-      compactPixels[mapped * 2] = pixels[i * 2];
-      compactPixels[mapped * 2 + 1] = pixels[i * 2 + 1];
-      compactSizes[mapped] = sizes[i];
-      compactTerrain[mapped] = terrain[i];
+    const compactLocal = new Float64Array(next * 2);
+    for (let node = 0; node < nodeCount; node++) {
+      const target = mapping[node];
+      if (target < 0) continue;
+      compactPixels[target * 2] = pixels[node * 2];
+      compactPixels[target * 2 + 1] = pixels[node * 2 + 1];
+      compactSizes[target] = sizes[node];
+      compactTerrain[target] = terrain[node];
+      compactLocal[target * 2] = local[node * 2];
+      compactLocal[target * 2 + 1] = local[node * 2 + 1];
     }
     pixels = compactPixels;
     sizes = compactSizes;
     terrain = compactTerrain;
-    count = next;
+    local = compactLocal;
+    nodeCount = next;
   }
-  return { pixels, sizes, terrain, owner: owners, count };
+  const ownerGrid = new Uint32Array(width * height).fill(NO_OWNER);
+  for (let y = 0; y < height; y++) {
+    const paddedRow = y * cells.paddedWidth;
+    const gridRow = y * width;
+    for (let x = 0; x < width; x++) {
+      const value = owner[paddedRow + x];
+      if (value >= 0) ownerGrid[gridRow + x] = value;
+    }
+  }
+  const edges = buildEdgeArrays(ownerGrid, nodeCount, width, height, local, sizes, terrain);
+  const components = buildComponents(edges.indptr, edges.indices, nodeCount);
+  const paletteValues: number[] = [];
+  const seen = new Set<number>();
+  for (let index = 0; index < editedCosts.length; index++) {
+    const value = editedCosts[index];
+    if (!seen.has(value)) {
+      seen.add(value);
+      paletteValues.push(value);
+    }
+  }
+  paletteValues.sort((left, right) => left - right);
+  const graphHash = options.graphHash ?? clientGraphHash(sourceHash, registration, edits, editedCosts, step, width, height);
+  const metadata: GraphMetadata = {
+    assetId: options.assetId ?? 'client',
+    schema: options.schema ?? CLIENT_ROUTING_SCHEMA,
+    sourceHash,
+    graphHash,
+    step,
+    adaptive: true,
+    width,
+    height,
+    nodeCount,
+    directedEdgeCount: edges.indices.length,
+    componentCount: components.componentCount,
+    costsPalette: paletteValues,
+    expected: { lengthSum: edges.lengthSum, weightSum: edges.weightSum, edgeCount: edges.pairCount },
+    samples: [],
+  };
+  return new RasterGraph({
+    metadata,
+    width,
+    height,
+    nodeCount,
+    pixels,
+    local,
+    costs: editedCosts,
+    owner: ownerGrid,
+    sizes,
+    terrain,
+    indptr: edges.indptr,
+    indices: edges.indices,
+    weights: edges.weights,
+    lengths: edges.lengths,
+    components: components.components,
+    componentCount: components.componentCount,
+    closedEdits,
+  });
+}
+
+/** Build a RasterGraph from already-decomposed arrays (persistence/tests). */
+export interface RasterGraphParts {
+  width: number;
+  height: number;
+  step?: number;
+  costs: Float32Array;
+  pixels: Float64Array;
+  sizes: Uint8Array;
+  terrain: Float32Array;
+  registration: RegistrationData;
+  metadata: Partial<GraphMetadata> & { graphHash: string };
+  closedEdits?: Uint8Array | null;
 }
 
 /** Two independent FNV-1a 32-bit passes -> 16 lowercase hex characters. */
@@ -575,6 +1031,8 @@ export class RasterGraph {
   readonly components: Uint32Array;
   readonly componentCount: number;
   readonly owner: Uint32Array;
+  /** Teacher-closed pixels (`1` = closed); null when the graph has no closes. */
+  readonly closedEdits: Uint8Array | null;
 
   private readonly scratchDistance: Float64Array;
   private readonly scratchParent: Int32Array;
@@ -588,7 +1046,8 @@ export class RasterGraph {
   private readonly heuristicScale: number;
   private nodeGrid: NodeGridIndex | null = null;
 
-  private constructor(data: GraphData) {
+  /** Internal constructor: use `load`, `fromArrays` or `buildGraphFromRaster`. */
+  constructor(data: GraphData) {
     this.metadata = data.metadata;
     this.width = data.width;
     this.height = data.height;
@@ -606,6 +1065,7 @@ export class RasterGraph {
     this.components = data.components;
     this.componentCount = data.componentCount;
     this.owner = data.owner;
+    this.closedEdits = data.closedEdits;
     this.scratchDistance = new Float64Array(this.nodeCount);
     this.scratchParent = new Int32Array(this.nodeCount);
     this.dijkstraHeap = new MinHeap(this.nodeCount, this.scratchDistance);
@@ -620,6 +1080,76 @@ export class RasterGraph {
       if (Number.isFinite(value) && value > 0 && value < minimumCost) minimumCost = value;
     }
     this.heuristicScale = Number.isFinite(minimumCost) ? minimumCost : 1;
+  }
+
+  /**
+   * Constructor path from already-decomposed arrays: rebuilds the owner grid,
+   * float64 local positions, canonical CSR and components. `metadata.graphHash`
+   * (plus any other provided metadata fields) is kept; geometry counters are
+   * always recomputed from the supplied arrays.
+   */
+  static fromArrays(parts: RasterGraphParts): RasterGraph {
+    const width = parts.width;
+    const height = parts.height;
+    const step = parts.step ?? (Number(parts.metadata.step) || 4);
+    if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1) throw new Error('通行图尺寸无效');
+    if (parts.costs.length !== width * height) throw new Error('通行图尺寸无效');
+    const nodeCount = parts.sizes.length;
+    if (parts.pixels.length !== nodeCount * 2) throw new Error('通行图节点数组不一致');
+    if (parts.terrain.length !== nodeCount) throw new Error('通行图节点数组不一致');
+    const mesh = new Mesh(parts.registration);
+    if (!mesh.hasMesh) throw new Error('缺少有效配准范围');
+    const assembled = assembleArrays(mesh, parts.pixels, parts.sizes, parts.terrain, width, height);
+    const defaults: GraphMetadata = {
+      assetId: 'client',
+      schema: CLIENT_ROUTING_SCHEMA,
+      sourceHash: '',
+      graphHash: parts.metadata.graphHash,
+      step,
+      adaptive: true,
+      width,
+      height,
+      nodeCount,
+      directedEdgeCount: assembled.edges.indices.length,
+      componentCount: assembled.components.componentCount,
+      costsPalette: [],
+      expected: {
+        lengthSum: assembled.edges.lengthSum,
+        weightSum: assembled.edges.weightSum,
+        edgeCount: assembled.edges.pairCount,
+      },
+      samples: [],
+    };
+    // Caller metadata (notably `graphHash`) wins; geometry counters stay truthful.
+    const metadata: GraphMetadata = {
+      ...defaults,
+      ...parts.metadata,
+      step,
+      width,
+      height,
+      nodeCount,
+      directedEdgeCount: assembled.edges.indices.length,
+      componentCount: assembled.components.componentCount,
+    };
+    return new RasterGraph({
+      metadata,
+      width,
+      height,
+      nodeCount,
+      pixels: parts.pixels,
+      local: assembled.local,
+      costs: parts.costs,
+      owner: assembled.owner,
+      sizes: parts.sizes,
+      terrain: parts.terrain,
+      indptr: assembled.edges.indptr,
+      indices: assembled.edges.indices,
+      weights: assembled.edges.weights,
+      lengths: assembled.edges.lengths,
+      components: assembled.components.components,
+      componentCount: assembled.components.componentCount,
+      closedEdits: parts.closedEdits ?? null,
+    });
   }
 
   /** Load and build a graph from the static data bundle. */
@@ -646,74 +1176,43 @@ export class RasterGraph {
     if (!metadata || typeof metadata !== 'object') throw new Error('通行图元数据无效');
     if (bundle.width !== metadata.width || bundle.height !== metadata.height) throw new Error('通行图数据与元数据不一致');
     const edits = opts.edits ?? state.edits ?? [];
-    let data: GraphData;
+    let graph: RasterGraph;
     if (edits.length > 0) {
-      data = RasterGraph.rebuildWithEdits(bundle, metadata, mesh, edits);
+      // Rebuild through the full Python-parity pipeline so locally edited maps
+      // keep the same quadtree/domain behaviour as client-processed ones.
+      const costs = new Float32Array(bundle.width * bundle.height);
+      for (let index = 0; index < costs.length; index++) costs[index] = bundle.palette[bundle.costs[index]];
+      const stateSourceHash = (state as MapState & { sourceHash?: string }).sourceHash;
+      graph = buildGraphFromRaster(costs, registration, metadata.sourceHash ?? stateSourceHash ?? '', edits,
+        Number(metadata.step) || 4, {
+          width: bundle.width,
+          height: bundle.height,
+          assetId: metadata.assetId,
+          schema: metadata.schema,
+          graphHash: `${metadata.graphHash}-e${shortHash(editsCanonical(edits))}`,
+        });
     } else {
-      data = RasterGraph.buildFromBundle(bundle, metadata, mesh);
+      graph = new RasterGraph(RasterGraph.buildFromBundle(bundle, metadata, mesh));
     }
     await yieldToUi();
     progress(90, '完成通行图');
-    return new RasterGraph(data);
+    return graph;
   }
 
   private static buildFromBundle(bundle: GraphBundle, metadata: GraphMetadata, mesh: Mesh): GraphData {
     const { width, height, nodeCount } = bundle;
     const costs = new Float32Array(width * height);
     for (let i = 0; i < costs.length; i++) costs[i] = bundle.palette[bundle.costs[i]];
-    const forward = mesh.forwardMany(bundle.pixels);
-    const owner = new Uint32Array(width * height).fill(NO_OWNER);
-    for (let node = 0; node < nodeCount; node++) {
-      const size = bundle.sizes[node];
-      const x0 = rintEven(bundle.pixels[node * 2] - (size - 1) / 2);
-      const y0 = rintEven(bundle.pixels[node * 2 + 1] - (size - 1) / 2);
-      for (let row = 0; row < size; row++) {
-        const start = (y0 + row) * width + x0;
-        owner.fill(node, start, start + size);
-      }
-    }
     const terrain = new Float32Array(nodeCount);
     for (let node = 0; node < nodeCount; node++) terrain[node] = bundle.palette[bundle.terrain[node]];
-    const edges = buildEdgeArrays(owner, nodeCount, width, height, forward.local, bundle.sizes, terrain);
-    const components = buildComponents(edges.indptr, edges.indices, nodeCount);
+    const assembled = assembleArrays(mesh, bundle.pixels, bundle.sizes, terrain, width, height);
     return {
-      metadata, width, height, nodeCount, pixels: bundle.pixels, local: forward.local, costs,
-      owner, sizes: bundle.sizes, terrain,
-      indptr: edges.indptr, indices: edges.indices, weights: edges.weights, lengths: edges.lengths,
-      components: components.components, componentCount: components.componentCount,
-    };
-  }
-
-  private static rebuildWithEdits(
-    bundle: GraphBundle, metadata: GraphMetadata, mesh: Mesh, edits: TerrainEdit[],
-  ): GraphData {
-    const { width, height } = bundle;
-    const costs = new Float32Array(width * height);
-    for (let i = 0; i < costs.length; i++) costs[i] = bundle.palette[bundle.costs[i]];
-    applyEdits(costs, width, height, edits);
-    const step = Number(metadata.step) || 4;
-    const cells = quadtreeCells(costs, mesh, width, height, step);
-    const nodeCount = cells.count;
-    const owner = new Uint32Array(width * height).fill(NO_OWNER);
-    for (let i = 0; i < cells.owner.length; i++) {
-      if (cells.owner[i] >= 0) owner[i] = cells.owner[i];
-    }
-    const forward = mesh.forwardMany(cells.pixels);
-    const edges = buildEdgeArrays(owner, nodeCount, width, height, forward.local, cells.sizes, cells.terrain);
-    const components = buildComponents(edges.indptr, edges.indices, nodeCount);
-    const hash = `${metadata.graphHash}-e${shortHash(JSON.stringify(edits))}`;
-    const updated: GraphMetadata = {
-      ...metadata,
-      graphHash: hash,
-      nodeCount,
-      directedEdgeCount: edges.indices.length,
-      componentCount: components.componentCount,
-    };
-    return {
-      metadata: updated, width, height, nodeCount, pixels: cells.pixels, local: forward.local, costs,
-      owner, sizes: cells.sizes, terrain: cells.terrain,
-      indptr: edges.indptr, indices: edges.indices, weights: edges.weights, lengths: edges.lengths,
-      components: components.components, componentCount: components.componentCount,
+      metadata, width, height, nodeCount, pixels: bundle.pixels, local: assembled.local, costs,
+      owner: assembled.owner, sizes: bundle.sizes, terrain,
+      indptr: assembled.edges.indptr, indices: assembled.edges.indices,
+      weights: assembled.edges.weights, lengths: assembled.edges.lengths,
+      components: assembled.components.components, componentCount: assembled.components.componentCount,
+      closedEdits: null,
     };
   }
 
@@ -781,7 +1280,7 @@ export class RasterGraph {
     if (!Number.isFinite(pointX) || !Number.isFinite(pointY)) throw new Error('到访坐标无效');
     const exact = this.node_at(pixel, 1);
     if (exact !== null) return exact;
-    const candidates = this.nodesWithin([pointX, pointY], maxDistancePx);
+    const candidates = this.queryNodesNear([pointX, pointY], maxDistancePx);
     for (const node of candidates) {
       if (this.clearSegment([pointX, pointY], this.nodePixel(node))) return node;
     }
@@ -792,14 +1291,18 @@ export class RasterGraph {
     return [this.pixels[node * 2], this.pixels[node * 2 + 1]];
   }
 
-  /** All node ids whose centre lies within `radiusPx`, nearest first. */
-  private nodesWithin(point: Pixel, radiusPx: number): number[] {
+  /**
+   * Node ids whose centre lies within `maxDistancePx` of `point` in native
+   * pixel coordinates, nearest-first (ties by node id). Python equivalent:
+   * `graph.tree.query_ball_point` followed by a distance sort.
+   */
+  queryNodesNear(point: Pixel, maxDistancePx: number): number[] {
     const index = this.ensureNodeGrid();
     const cell = index.cell;
-    const x0 = Math.max(0, Math.floor((point[0] - radiusPx) / cell));
-    const x1 = Math.min(index.cols - 1, Math.floor((point[0] + radiusPx) / cell));
-    const y0 = Math.max(0, Math.floor((point[1] - radiusPx) / cell));
-    const y1 = Math.min(index.rows - 1, Math.floor((point[1] + radiusPx) / cell));
+    const x0 = Math.max(0, Math.floor((point[0] - maxDistancePx) / cell));
+    const x1 = Math.min(index.cols - 1, Math.floor((point[0] + maxDistancePx) / cell));
+    const y0 = Math.max(0, Math.floor((point[1] - maxDistancePx) / cell));
+    const y1 = Math.min(index.rows - 1, Math.floor((point[1] + maxDistancePx) / cell));
     const candidates: { node: number; distance: number }[] = [];
     for (let row = y0; row <= y1; row++) {
       for (let column = x0; column <= x1; column++) {
@@ -809,12 +1312,49 @@ export class RasterGraph {
           const dx = this.pixels[node * 2] - point[0];
           const dy = this.pixels[node * 2 + 1] - point[1];
           const distance = Math.sqrt(dx * dx + dy * dy);
-          if (distance <= radiusPx + 1e-9) candidates.push({ node, distance });
+          if (distance <= maxDistancePx + 1e-9) candidates.push({ node, distance });
         }
       }
     }
     candidates.sort((left, right) => left.distance - right.distance || left.node - right.node);
     return candidates.map(entry => entry.node);
+  }
+
+  /** Single nearest node by centre distance (Python `cKDTree.query`). */
+  nearestNode(pixel: Pixel): number | null {
+    if (this.nodeCount === 0) return null;
+    const point: Pixel = [pixel[0], pixel[1]];
+    let radius = 32;
+    const maximum = Math.max(this.width, this.height);
+    while (radius < maximum * 2) {
+      const candidates = this.queryNodesNear(point, radius);
+      if (candidates.length) {
+        let best = candidates[0];
+        let bestDistance = Infinity;
+        for (const node of candidates) {
+          const dx = this.pixels[node * 2] - point[0];
+          const dy = this.pixels[node * 2 + 1] - point[1];
+          const distance = Math.sqrt(dx * dx + dy * dy);
+          if (distance < bestDistance || (distance === bestDistance && node < best)) {
+            best = node;
+            bestDistance = distance;
+          }
+        }
+        return best;
+      }
+      radius *= 2;
+    }
+    return null;
+  }
+
+  /** Exact owner-grid node id at the rounded pixel (no reachability check). */
+  nodeAtPixel(pixel: Pixel): number | null {
+    if (!Number.isFinite(pixel[0]) || !Number.isFinite(pixel[1])) return null;
+    const x = rintEven(pixel[0]);
+    const y = rintEven(pixel[1]);
+    if (x < 0 || x >= this.width || y < 0 || y >= this.height) return null;
+    const node = this.owner[y * this.width + x];
+    return node === NO_OWNER ? null : node;
   }
 
   private ensureNodeGrid(): NodeGridIndex {

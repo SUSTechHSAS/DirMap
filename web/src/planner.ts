@@ -688,10 +688,29 @@ class StaticPlanner implements Planner {
 }
 
 const plannerCache = new Map<string, Promise<Planner>>();
+const clientPlannerCache = new Map<string, Planner>();
 
-/** Drop every cached planner (used by the Lead's `data.ts` re-export). */
+/** Drop every cached planner (baked and client graphs). */
 export function clearPlannerCache(): void {
   plannerCache.clear();
+  clientPlannerCache.clear();
+}
+
+/**
+ * Planner for a client-built graph (uploaded/processed map). `approaches` must
+ * have been resolved against exactly this graph (e.g. by `web/src/access.ts`),
+ * so `plan`/`navigate` never fetch baked bundles. Client graphs are large: the
+ * cache keeps only the newest graph's planner; the caller owns the graph.
+ */
+export function createPlannerFromGraph(graph: RasterGraph, approaches: BakedApproaches, state: MapState): Planner {
+  if (!state.registration) throw new Error('缺少有效配准范围');
+  const key = `${state.assetId}:${state.version}:${graph.metadata.graphHash}`;
+  const cached = clientPlannerCache.get(key);
+  if (cached) return cached;
+  const planner = new StaticPlanner(state, graph, new Mesh(state.registration), approaches, false);
+  clientPlannerCache.clear();
+  clientPlannerCache.set(key, planner);
+  return planner;
 }
 
 async function buildPlanner(state: MapState, progress: PlannerProgress, assets: PlannerAssets | undefined): Promise<Planner> {

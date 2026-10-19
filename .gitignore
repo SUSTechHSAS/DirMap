@@ -13,3 +13,5 @@ data/cache/
 test-results/
 playwright-report/
 .env
+web/public/vendor/
+.tmp-*

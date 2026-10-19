@@ -32,6 +32,7 @@ import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,6 +46,25 @@ EXPECTED_SZU3_GRAPH_HASH = "2570e1372e5059e7a540"
 MAGIC = b"DMGRAPH1"
 FORMAT_VERSION = 1
 GRAPH_STEP = 4
+MAGIC_SEMANTICS = b"DMSEM1"
+SEMANTICS_NAMES = ("building", "water", "point_ink", "vegetation", "restricted")
+SEMANTICS_VERSION = 1
+BLOCKED_SAMPLE_COUNT = 3000
+COSTS_SAMPLE_COUNT = 2000
+LCG_MULT = 1664525
+LCG_INC = 1013904223
+LCG_MOD = 1 << 32
+CLIENT_SAMPLING = {
+    "lcg": ("x_{n+1} = (1664525*x_n + 1013904223) mod 2^32; flat = x mod (width*height);"
+            " x = flat mod width, y = flat // width"),
+    "blockedSamples": "1000 blocked/edge points + 500 blocked points + 1500 uniform points",
+    "costsSamples": "800 cost-edge points + 400 cost-0 points + 300 vegetation(1.5) points + 500 uniform points",
+}
+# Source files whose content defines the client-port reference behaviour. Kept
+# separate from dirmap.service.implementation_signature() so deleting unrelated
+# legacy server modules cannot invalidate the committed client goldens.
+VISION_SOURCE_FILES = ("vision.py", "symbols.py", "overprint.py", "reference.py",
+                       "ocr.py", "protocol.py", "geometry.py", "schemas.json")
 APPROACH_NOTE = (
     "到访位置在构建时按“起终点符号所在通行区域”预解算：先取无约束的合法到访位置，"
     "若其通行区域与起点不同，再按起点区域重新解算；失败时保存中文原因。"
@@ -78,6 +98,18 @@ def log(message):
 def fail(message):
     print(f"[bake] ERROR: {message}", flush=True)
     raise SystemExit(1)
+
+
+def vision_source_hash():
+    package = Path(service.__file__).resolve().parent
+    digest = hashlib.sha256()
+    for name in VISION_SOURCE_FILES:
+        path = package / name
+        if not path.is_file():
+            fail(f"缺少参考实现源文件 dirmap/{name}")
+        digest.update(name.encode("utf-8"))
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
 
 
 def sha256_file(path):
@@ -190,6 +222,7 @@ def build_map(asset_id):
         "costs": costs,
         "palette": palette.astype(np.float32),
         "costIndex": cost_index.astype(np.uint8),
+        "semantics": semantics,
         "width": width,
         "height": height,
     }
@@ -694,6 +727,270 @@ def write_optimizer_fixture(info, raw_matrix):
         f"{len(result['routes'])} 队 ({elapsed:.2f}s)")
 
 
+def _encode_png(image):
+    ok, buffer = cv2.imencode(".png", image, [cv2.IMWRITE_PNG_COMPRESSION, 7])
+    if not ok:
+        raise ValueError("PNG 编码失败")
+    return buffer.tobytes()
+
+
+def semantics_bytes(info):
+    """Bit-packed DMSEM1 payload (row-major, LSB-first, last byte zero-padded)."""
+    width, height = info["width"], info["height"]
+    parts = [MAGIC_SEMANTICS,
+             struct.pack("<HIIB", SEMANTICS_VERSION, width, height, len(SEMANTICS_NAMES))]
+    for name in SEMANTICS_NAMES:
+        encoded = name.encode("utf-8")
+        parts.append(struct.pack("<B", len(encoded)))
+        parts.append(encoded)
+    for name in SEMANTICS_NAMES:
+        mask = info["semantics"].get(name)
+        if mask is None:
+            fail(f"{info['assetId']}: terrain.npz 缺少语义掩码 {name}")
+        mask = np.asarray(mask, dtype=bool)
+        if mask.shape != (height, width):
+            fail(f"{info['assetId']}: 语义掩码 {name} 尺寸 {mask.shape} != {(height, width)}")
+        parts.append(np.packbits(mask.ravel(order="C"), bitorder="little").tobytes())
+    return b"".join(parts)
+
+
+def region_feature_counts(image):
+    """Exactly the feature detection of dirmap.vision.analyze (building/water/pitch)."""
+    from dirmap.vision import colour_masks, region_features
+    height, width = image.shape[:2]
+    area = height * width
+    masks = colour_masks(image)
+    building = region_features(masks["building"], "building", area, close=5)
+    water = region_features(masks["water"], "water", area, close=7)
+    h, s, v = cv2.split(cv2.cvtColor(image, cv2.COLOR_BGR2HSV))
+    pitch_ink = ((h >= 12) & (h <= 34) & (s >= 65) & (s <= 180) & (v > 200)).astype(np.uint8) * 255
+    pitch = 0
+    for feature in region_features(pitch_ink, "pitch", height * width, close=5):
+        rect = cv2.minAreaRect(np.asarray(feature["points"], np.float32))
+        rectangularity = feature["area"] / max(1, rect[1][0] * rect[1][1])
+        if rectangularity > .72 and feature["area"] > height * width * .0004 and feature["aspect"] < 3.5:
+            pitch += 1
+    return {"building": len(building), "water": len(water), "pitch": pitch}
+
+
+def _lcg_next(seed):
+    state = [int(seed) & 0xFFFFFFFF]
+
+    def next_value():
+        state[0] = (LCG_MULT * state[0] + LCG_INC) % LCG_MOD
+        return state[0]
+
+    return next_value
+
+
+def _value_edge_indices(values):
+    values = np.asarray(values)
+    edge = np.zeros(values.shape, bool)
+    if values.shape[1] > 1:
+        edge[:, :-1] = values[:, :-1] != values[:, 1:]
+    if values.shape[0] > 1:
+        edge[:-1, :] |= values[:-1, :] != values[1:, :]
+    return np.flatnonzero(edge.ravel(order="C"))
+
+
+def _sample_flat_indices(width, height, count, seed, groups):
+    """Deterministic LCG sampling: prioritized groups first, then uniform cover."""
+    total = width * height
+    next_value = _lcg_next(seed)
+    chosen, seen = [], set()
+    for indices, quota in groups:
+        if quota <= 0:
+            continue
+        candidates = np.asarray(indices, dtype=np.int64).ravel()
+        if not len(candidates):
+            continue
+        want = min(int(quota), len(candidates))
+        attempts = 0
+        while want > 0 and attempts < len(candidates) * 4 + 100:
+            index = int(candidates[next_value() % len(candidates)])
+            attempts += 1
+            if index not in seen:
+                seen.add(index)
+                chosen.append(index)
+                want -= 1
+    attempts = 0
+    while len(chosen) < count and attempts < count * 50:
+        index = next_value() % total
+        attempts += 1
+        if index not in seen:
+            seen.add(index)
+            chosen.append(index)
+    if len(chosen) < count:
+        fail(f"无法生成 {count} 个确定性采样点（只有 {len(chosen)} 个）")
+    return chosen[:count]
+
+
+def _client_samples(info, values, groups, count, lane):
+    height, width = np.asarray(values).shape
+    flat = np.asarray(values).ravel(order="C")
+    seed = int(hashlib.sha256(f"client-processing:{info['assetId']}:{lane}".encode("utf-8")).hexdigest()[:8], 16)
+    indices = _sample_flat_indices(width, height, count, seed, groups)
+    samples = []
+    for index in indices:
+        value = flat[index]
+        if lane == "blocked":
+            samples.append({"x": int(index % width), "y": int(index // width), "v": int(value)})
+        else:
+            samples.append({"x": int(index % width), "y": int(index // width), "v": float(value)})
+    return samples
+
+
+def reference_implementation(image, blocked_samples, costs_samples):
+    """Current dirmap.vision.analyze output at the same golden sample coordinates.
+
+    The committed `blocked.png`/`terrain.npz` artifacts predate a later edit of
+    `dirmap/vision.py`/`overprint.py`; this block lets the client port validate
+    against the *current* Python reference implementation while the documented
+    primary fields remain the baked-artifact truth.
+    """
+    from dirmap.vision import analyze
+    result = analyze(image, labeler=None)
+    counts = {"building": 0, "water": 0, "pitch": 0}
+    for feature in result["features"]:
+        if feature["kind"] in counts:
+            counts[feature["kind"]] += 1
+    blocked = np.asarray(result["blocked"])
+    costs = np.asarray(result["costs"], np.float32)
+    return {
+        "generatedBy": "dirmap.vision.analyze",
+        "sourceCodeHash": vision_source_hash(),
+        "featureCounts": counts,
+        "statistics": result["statistics"],
+        "forbiddenPixelFraction": result["statistics"]["forbiddenPixelFraction"],
+        "blockedSampleValues": [int(blocked[sample["y"], sample["x"]]) for sample in blocked_samples],
+        "costsSampleValues": [float(costs[sample["y"], sample["x"]]) for sample in costs_samples],
+        "note": "客户端主金标：当前 dirmap.vision.analyze 在同一 original.png 上的逐像素结果；"
+                "controls 与 samples 坐标在同一文件中共享。",
+    }
+
+
+def write_processing_inputs(info, include_reference=True):
+    """Bake original.png (lossless Python input), semantics.bin.gz and the client goldens."""
+    from dirmap.vision import read_image
+    asset_id = info["assetId"]
+    directory = OUT / "maps" / asset_id
+    image = read_image(info["asset"]["path"])
+    if (image.shape[1], image.shape[0]) != (info["width"], info["height"]):
+        fail(f"{asset_id}: 解码图像尺寸 {image.shape[::-1]} 与 state 不一致")
+    png_bytes = _encode_png(image)
+    write_bytes(directory / "original.png", png_bytes)
+    roundtrip = cv2.imdecode(np.frombuffer(png_bytes, np.uint8), cv2.IMREAD_COLOR)
+    if not np.array_equal(roundtrip, image):
+        fail(f"{asset_id}: original.png 的往返像素与 JPEG 解码不一致")
+    write_bytes(directory / "semantics.bin.gz",
+                gzip.compress(semantics_bytes(info), compresslevel=9, mtime=0))
+    statistics = info["state"].get("statistics") or {}
+    blocked_path = store.artifact_path(info["state"], "blocked.png")
+    blocked = cv2.imread(str(blocked_path), cv2.IMREAD_GRAYSCALE)
+    if blocked is None or blocked.shape != (info["height"], info["width"]):
+        fail(f"{asset_id}: blocked.png 缺失或尺寸不正确")
+    if not set(np.unique(blocked).tolist()) <= {0, 255}:
+        fail(f"{asset_id}: blocked.png 应只包含 0/255")
+    blocked_flat = blocked.ravel(order="C")
+    costs = np.asarray(info["costs"], np.float32)
+    blocked_samples = _client_samples(
+        info, blocked,
+        [(_value_edge_indices(blocked), 1000), (np.flatnonzero(blocked_flat > 0), 500)],
+        BLOCKED_SAMPLE_COUNT, "blocked")
+    costs_samples = _client_samples(
+        info, costs,
+        [(_value_edge_indices(costs), 800), (np.flatnonzero(costs.ravel(order="C") == 0), 400),
+         (np.flatnonzero(costs.ravel(order="C") == np.float32(1.5)), 300)],
+        COSTS_SAMPLE_COUNT, "costs")
+    controls = []
+    for control in info["state"]["controls"]:
+        controls.append({
+            "id": control["id"],
+            "label": control.get("label"),
+            "role": control.get("role", "control"),
+            "pixel": [float(control["pixel"][0]), float(control["pixel"][1])],
+            "radiusPx": float(control.get("radiusPx") or 0.0),
+            "state": control.get("state"),
+            "labelSource": control.get("labelSource"),
+        })
+    blocked_coordinates = [{"x": sample["x"], "y": sample["y"]} for sample in blocked_samples]
+    costs_coordinates = [{"x": sample["x"], "y": sample["y"]} for sample in costs_samples]
+    blocked_flat = blocked.ravel(order="C")
+    costs_flat = costs.ravel(order="C")
+    artifact_block = {
+        "featureCounts": {"building": statistics.get("buildingCandidates"),
+                          "water": statistics.get("waterCandidates")},
+        "statistics": statistics,
+        "forbiddenPixelFraction": statistics.get("forbiddenPixelFraction"),
+        "blockedSampleValues": [int(blocked_flat[sample["y"] * info["width"] + sample["x"]])
+                                for sample in blocked_coordinates],
+        "costsSampleValues": [float(costs_flat[sample["y"] * info["width"] + sample["x"]])
+                              for sample in costs_coordinates],
+        "note": "次级容差金标：来自本次构建提交的 blocked.png / terrain.npz / state.statistics。"
+                "这些工件早于最近一次 dirmap/vision.py、overprint.py 修改，与当前 Python 参考实现"
+                "存在小差异（见 docs/static-architecture.md Addendum C.5）；没有保存 pitch 计数。",
+    }
+    reference = None
+    if include_reference:
+        reference = reference_implementation(image, blocked_coordinates, costs_coordinates)
+        reference["controls"] = controls
+        feature_counts = reference["featureCounts"]
+    else:
+        feature_counts = region_feature_counts(image)
+    for kind, key in (("building", "buildingCandidates"), ("water", "waterCandidates")):
+        recorded = statistics.get(key)
+        if recorded is not None and int(recorded) != feature_counts[kind]:
+            log(f"{asset_id}: 参考实现 featureCounts.{kind}={feature_counts[kind]} 与 state.statistics.{key}={recorded} 不同"
+                f"（工件早于最近一次视觉代码修改，主金标以当前参考实现为准）")
+    entry = {
+        "assetId": asset_id,
+        "width": info["width"],
+        "height": info["height"],
+        "controls": controls,
+        "samples": {"blocked": blocked_coordinates, "costs": costs_coordinates},
+        "artifact": artifact_block,
+    }
+    if reference is not None:
+        entry["referenceImplementation"] = reference
+    log(f"{asset_id}: original.png {human_size(len(png_bytes))}, "
+        f"semantics.bin.gz {human_size((directory / 'semantics.bin.gz').stat().st_size)}, "
+        f"reference featureCounts {feature_counts}, artifact counts "
+        f"{artifact_block['featureCounts']}")
+    return entry
+
+
+def write_reference_features():
+    features = []
+    for feature in service.reference():
+        if feature.get("kind") not in ("building", "water", "pitch"):
+            continue
+        features.append({
+            "id": str(feature["id"]),
+            "kind": feature["kind"],
+            "center": [float(feature["center"][0]), float(feature["center"][1])],
+            "area": float(feature["area"]),
+            "aspect": float(feature["aspect"]),
+            "points": [[float(point[0]), float(point[1])] for point in feature["points"]],
+        })
+    write_json(OUT / "reference-features.json", {"frame": Frame().as_dict(), "features": features})
+    log(f"reference-features.json: {len(features)} 个建筑/水体/球场地物")
+    return len(features)
+
+
+def write_client_processing_fixture(entries):
+    write_json(FIXTURES / "client-processing.json",
+               {"sampling": CLIENT_SAMPLING,
+                "note": "每个地图条目有两个金标块，使用同一组 samples 坐标与顺序："
+                        "referenceImplementation = 客户端主金标（当前 dirmap.vision.analyze 在 "
+                        "original.png 上的输出；generatedBy/sourceCodeHash 标明生成来源），"
+                        "cv-port 应按它做精确断言；artifact = 次级容差金标（本次提交的 "
+                        "blocked.png / terrain.npz / state.statistics，早于最近一次视觉代码修改），"
+                        "按 Addendum C.5 的宽松阈值比较（blocked ≥99.4%，forbidden ±0.01，"
+                        "building/water 计数 ±10%；artifact 无 pitch 计数，pitch 只与 "
+                        "referenceImplementation 比较）。controls/width/height 两个金标共用。",
+                "maps": entries})
+
+
 def write_catalog(states, built_metadata, generated_at):
     maps = []
     for asset in store.catalog():
@@ -886,6 +1183,7 @@ def main(argv=None):
     metadata = {}
     raw_matrices = {}
     samples_by_asset = {}
+    client_entries = {}
     fixture_count = 0
     for asset_id in requested:
         started_map = time.perf_counter()
@@ -899,6 +1197,7 @@ def main(argv=None):
         samples_by_asset[asset_id] = samples
         matrix_fixture, raw_matrix = bake_matrix(info)
         graph_metadata, bundle_path = write_map_bundle(info, exported, expected, components, samples)
+        client_entries[asset_id] = write_processing_inputs(info, include_reference=not args.skip_fixtures)
         metadata[asset_id] = graph_metadata
         built[asset_id] = info
         log(f"{asset_id}: graph.bin.gz {human_size(bundle_path.stat().st_size)}, "
@@ -919,6 +1218,10 @@ def main(argv=None):
     write_legends()
     legend_count = len(LEGEND_FILES)
     reference_count = write_reference()
+    reference_feature_count = write_reference_features()
+    if not args.skip_fixtures and len(client_entries) == len(catalog_ids):
+        write_client_processing_fixture([client_entries[asset_id] for asset_id in catalog_ids])
+        fixture_count += 1
     health = write_health(generated_at)
     catalog = write_catalog(states, metadata, generated_at)
 
@@ -934,20 +1237,22 @@ def main(argv=None):
     release = write_release(states, built_hashes)
 
     log("")
-    log("汇总 | 地图 | 尺寸 | 节点 | 有向边 | 连通块 | 到访点 ok | 图大小")
+    log("汇总 | 地图 | 尺寸 | 节点 | 有向边 | 连通块 | 到访点 ok | 图大小 | original.png | semantics")
     for asset_id in requested:
         info, graph_metadata = built[asset_id], metadata[asset_id]
         ok = sum(1 for entry in info["approaches"].values() if entry["ok"])
         total = len(info["approaches"])
         size = (OUT / "maps" / asset_id / "graph.bin.gz").stat().st_size
+        png_size = (OUT / "maps" / asset_id / "original.png").stat().st_size
+        semantics_size = (OUT / "maps" / asset_id / "semantics.bin.gz").stat().st_size
         log(f"     | {asset_id} | {info['width']}x{info['height']} | {graph_metadata['nodeCount']} | "
             f"{graph_metadata['directedEdgeCount']} | {graph_metadata['componentCount']} | "
-            f"{ok}/{total} | {human_size(size)}")
+            f"{ok}/{total} | {human_size(size)} | png {human_size(png_size)} | sem {human_size(semantics_size)}")
     log(f"数据目录 {OUT.relative_to(ROOT)}: {human_size(directory_size(OUT))}")
     if FIXTURES.exists():
         log(f"fixtures {FIXTURES.relative_to(ROOT)}: {human_size(directory_size(FIXTURES))}")
-    log(f"图例 {legend_count} 个, 校园参照要素 {reference_count} 个, 目录地图 {len(catalog['maps'])} 张, "
-        f"发布课程 {release['id'] if release else '无'}")
+    log(f"图例 {legend_count} 个, 校园参照要素 {reference_count} 个, 客户端参照地物 {reference_feature_count} 个, "
+        f"目录地图 {len(catalog['maps'])} 张, 发布课程 {release['id'] if release else '无'}")
     log(f"总耗时 {time.perf_counter() - started:.2f}s")
     return 0
 

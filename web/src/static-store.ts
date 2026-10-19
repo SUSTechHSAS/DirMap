@@ -39,11 +39,14 @@ export function loadStateOverride(assetId: string): StateOverride | null {
   return saved;
 }
 
-export function saveStateOverride(assetId: string, base: MapState, controls: Control[], edits: TerrainEdit[]): StateOverride {
+export function saveStateOverride(assetId: string, base: MapState, controls: Control[], edits: TerrainEdit[],
+  options: { bump?: boolean } = {}): StateOverride {
   const existing = loadStateOverride(assetId);
-  const revision = (existing?.revision ?? 0) + 1;
+  // Review-only writes (accepting targets) do not change geometry/costs, so the
+  // map version must stay stable or frozen student courses would look stale.
+  const revision = options.bump === false ? (existing?.revision ?? 0) : (existing?.revision ?? 0) + 1;
   const override: StateOverride = {
-    version: base.version + revision,
+    version: options.bump === false ? (existing?.version ?? base.version) : base.version + revision,
     controls, edits, reviewed: base.reviewed,
     review: (base as MapState & { review?: unknown }).review,
     updatedAt: Date.now(), revision,

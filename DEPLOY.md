@@ -7,7 +7,7 @@
 
 ## 1. 部署结构
 
-- 构建产物 **`web/dist/`** 就是整个网站：`index.html`、带哈希的 `assets/*`、`sw.js`，以及从 `web/public/**` 原样复制的文件（包括 `data/**` 烘焙数据和 `.nojekyll`）。
+- 构建产物 **`web/dist/`** 就是整个网站：`index.html`、带哈希的 `assets/*`、`sw.js`，以及从 `web/public/**` 原样复制的文件（`data/**` 烘焙数据约 32 MB、`.nojekyll`）和 `vendor/opencv.js`（约 11 MB，浏览器内识别管线的 WASM 引擎，懒加载）。`vendor/` 由 `npm run vendor:assets`（`npm ci` 的 prepare / build 前自动执行）从 `node_modules` 复制，不提交到仓库。
 - [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) 在 **push 到 `main`** 或 **手动 `workflow_dispatch`** 时构建并部署，不需要 `gh-pages` 分支。
 - 站点地址：
   - 项目站点 `https://<user>.github.io/<repo>/` → 构建 base 为 `/<repo>/`（workflow 默认）；
@@ -25,7 +25,7 @@
 
 `deploy.yml` 分为两个 job：
 
-- **build**：`actions/checkout@v4` → `actions/setup-node@v4`（Node 24，npm 缓存）→ `npm ci` → `npm test` → `DIRMAP_BASE=/<repo>/ npm run build` → `actions/configure-pages@v5` → `actions/upload-pages-artifact@v3`（`path: web/dist`）。
+- **build**：`actions/checkout@v4` → `actions/setup-node@v4`（Node 24，npm 缓存）→ `npm ci`（prepare 会把 `opencv.js` 复制到 `web/public/vendor/`）→ `npm test`（Node 单元测试 + 规划/CV 管线 golden，不需要 Python）→ `DIRMAP_BASE=/<repo>/ npm run build` → `actions/configure-pages@v5` → `actions/upload-pages-artifact@v3`（`path: web/dist`）。
 - **deploy**：`needs: build`，环境 `github-pages`，用 `actions/deploy-pages@v4` 发布。部署 URL 显示在这次运行的 environment 中。
 
 并发组为 `pages`，同一时间只允许一个部署且不会中途取消。
@@ -94,8 +94,9 @@ npm run build
 ```
 
 - 只重烘一张图：追加 `--asset szu-3`；快速迭代可加 `--skip-fixtures`。
-- baker 是幂等且确定性的，但 `generatedAt` 会变化，属正常现象。
-- 生成的文件布局见 [docs/static-architecture.md](docs/static-architecture.md) §4：`catalog.json`、`health.json`、`reference.json`、`releases.json`、`releases/<id>.json`、`maps/<assetId>/*`、`legends/*`。
+- baker 是幂等且确定性的：同一份源数据连续两次完整 bake 的 46 个文件字节一致（`generatedAt` 由源数据 `updatedAt` 推导，不再随意变化）。
+- 生成的文件布局见 [docs/static-architecture.md](docs/static-architecture.md) §4/§C.5：`catalog.json`、`health.json`、`reference.json`、`reference-features.json`、`releases.json`、`releases/<id>.json`、`maps/<assetId>/*`（含 `original.png`、`semantics.bin.gz`、`graph.bin.gz`、`approaches.json`）、`legends/*`、`tests/fixtures/static/client-processing.json`。
+- `web/public/data/maps/<id>/original.png` 是浏览器识别管线的无损输入（与 Python 识别输入逐像素一致）；`semantics.bin.gz`、`reference-features.json` 与 `client-processing.json` 供浏览器管线与 golden 测试使用。
 - 提交 `web/public/data/**` 后 push 到 `main`，Actions 会重新构建并部署。**不要手改生成文件**；磁偏角表过期时重新运行 baker 即可。
 
 ## 7. 教师发布课程后如何上线静态站
@@ -116,15 +117,27 @@ npm run build
 
 - 学生刷新课程列表即可看到新课；`release.id`、`assetId` 必须与文件内容和地图一致，否则会报“无法载入课程”。
 - 教师本地“发布”的课程只存在当前浏览器的 localStorage，并可随时下载 JSON；不会自动同步到其它设备。
+- **本机处理过的地图**（重新识别三张内置图或上传新图）的课程只在同一浏览器可用：`release.json` 只包含课程与路线，地图的原图/叠层/通行图数据保存在该浏览器的 IndexedDB 中。跨设备分享需要在另一台设备上重新导入原图并处理，或把处理数据纳入站点构建数据（见第 8 节）。
 - 若课程 JSON 含 `"superseded": true`，service worker 会拒绝离线保存（撤回的课程不会因断网重新可用）。
 - 如需撤回课程：删除 `data/releases/<id>.json`、从 `releases.json` 移除索引，重新部署；已离线保存的学生设备会保留旧副本，联网后不再更新。
 
-## 8. 静态版的功能边界
+## 8. 功能边界与浏览器内处理
 
-- **不支持**：OCR/图片识别、地形重新分析、人工重新配准、上传新的地图扫描件、服务端作业队列、跨设备状态同步。
-- **路线规划**：在浏览器内完成，并需要首次在线下载 `graph.bin.gz` 等数据。CP-SAT 已移除：小规模精确 DP 保持最优证明，其余情况为限时启发式 `FEASIBLE`（`proof.globalOptimalityProven: false`），界面上不会再显示“已证明最优”。
-- **教师编辑**：目标点、标签、地形开闭、课程规则等改动只保存在本机 localStorage；可一键“恢复构建时数据”。这些编辑不会写回静态文件。
-- **手机导航**：定位/罗盘能力与浏览器和 HTTPS 有关；静态站部署在 GitHub Pages 上即 HTTPS，但离线时无法获取教师更新（会显示离线标记）。
+**全部业务功能都在网页内可用**：自动识别与配准、上传新图、更新通行识别、同名点校准、路线规划、发布课程、学生选队/打点/偏航重规划。没有服务器进程；页面运行时不发任何 `/api` 请求。
+
+浏览器内处理的资源与代价：
+
+- 识别/配准管线使用 [OpenCV.js](https://docs.opencv.org/4.x/d5/d10/tutorial_js_root.html)（WASM，约 11 MB，随站点静态文件提供，首次处理时懒加载）。
+- OCR 使用 tesseract.js：worker/core/英文模型默认从 jsdelivr CDN 加载（首次约几 MB）；**CDN 不可达或离线时不会阻塞识别**，编号保留“待核N”，可手工修改。
+- 处理在主线程分阶段执行并显示进度；桌面浏览器参考耗时：szu-2（986×735）约 13–16 秒、szu-1（1649×2176）约 38 秒、szu-3（2555×2585）约 1–2 分钟；更新通行识别约 4 秒。手机处理大图明显更慢且内存压力大，建议用桌面备课。
+- 重新识别内置图会复用该图构建时的可信配准；上传的新图会尝试在浏览器内自动配准，失败时可用“同名点”手动校准。
+
+其他边界（与静态托管/计算资源有关，不是缺失功能）：
+
+- **路线规划**：浏览器内完成；小规模精确 DP 保持最优证明，大规模为时间预算内的可行解 `FEASIBLE`（未运行 CP-SAT；界面显示“当前最佳可行”）。
+- **数据持久化**：本机处理结果、教师编辑、已发布课程保存在浏览器 IndexedDB/localStorage；清除站点数据或换浏览器会丢失，可从原图重新处理。
+- **跨设备同步**：本机处理的地图/课程不会自动同步；未处理的构建时地图课程可通过提交 `release.json` 跨设备分享。
+- **手机导航**：定位/罗盘能力与浏览器和 HTTPS 有关；GitHub Pages 提供 HTTPS。离线时缺少通行图 bundle 则保留已下载路线。
 
 ## 9. 隐私与离线说明
 

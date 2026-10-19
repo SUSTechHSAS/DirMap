@@ -9,9 +9,9 @@ export interface Control {
 export interface TerrainEdit { kind: 'open' | 'close'; pixels: Pixel[]; radiusPx: number; cost?: number }
 export interface Anchor { pixel: Pixel; lnglat: Pixel; purpose: 'fit' | 'validation' }
 export interface MapState {
-  assetId: string; processed?: boolean; name: string; width: number; height: number; version: number;
+  assetId: string; processed?: boolean; name: string; filename?: string; width: number; height: number; version: number;
   registrationStale?: boolean;
-  terrainSchema?: string; routingSchema?: string; graphHash?: string | null; review?: unknown; static?: true;
+  terrainSchema?: string; routingSchema?: string; graphHash?: string | null; review?: unknown; static?: true; sourceHash?: string;
   controls: Control[]; edits: TerrainEdit[]; extent?: number[]; reviewed: boolean;
   registration: { affine: number[][]; source: Pixel[]; target: Pixel[]; triangles: number[][] } | null;
   quality: { state: string; method: string; fitCount: number; validationCount: number; medianErrorM: number | null; p95ErrorM: number | null; inheritedGeographicP95M?: number; validationScope: string; baseAssetId?: string } | null;
@@ -53,7 +53,7 @@ export interface Approach {
 }
 export interface Catalog { maps: { id: string; name: string; filename: string; sha256?: string; processed: boolean; controls: number | null;
   courseDefaults?: { mode: string; mandatoryLabels: string[]; mandatoryOrder: boolean; description?: string } | null
-  hasGraph?: boolean; hasApproaches?: boolean }[]; legends: { name: string; url: string }[] }
+  hasGraph?: boolean; hasApproaches?: boolean; local?: boolean; sourceKind?: string; version?: number }[]; legends: { name: string; url: string }[] }
 
 /** Static build metadata returned with the catalog. */
 export interface BakedCatalog extends Catalog {

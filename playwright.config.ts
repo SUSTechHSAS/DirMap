@@ -82,7 +82,12 @@ export default defineConfig({
     headless: true,
     viewport: { width: 1440, height: 980 },
     serviceWorkers: 'allow',
-    trace: 'retain-on-failure',
+    // Publishing a course triggers a release JSON download; accept it silently.
+    acceptDownloads: true,
+    // Traces are disabled on purpose: with 12 heavy WebAssembly/OCR tests the
+    // trace artifact writer raced with context teardown (ENOENT on close) and
+    // flaked once. Failure screenshots are enough for this suite's diagnostics.
+    trace: 'off',
     screenshot: 'only-on-failure',
     video: 'off',
     launchOptions: {

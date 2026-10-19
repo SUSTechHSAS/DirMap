@@ -38,6 +38,7 @@ import sys
 from datetime import date
 from pathlib import Path
 
+import cv2
 import numpy as np
 from scipy.sparse import coo_matrix, csr_matrix
 from scipy.sparse.csgraph import connected_components, dijkstra
@@ -53,11 +54,32 @@ EXPECTED_SZU3_HASH = "2570e1372e5059e7a540"
 MAP_IDS = ("szu-1", "szu-2", "szu-3")
 RELEASE_PLAN_ID = "5684df3f33f04390"
 MAX_FIXTURE_BYTES = 2 * 1024 * 1024
+MAX_DATA_FILE_BYTES = 100 * 1024 * 1024
+SEMANTICS_MAGIC = b"DMSEM1"
+SEMANTICS_NAMES = ("building", "water", "point_ink", "vegetation", "restricted")
+BLOCKED_SAMPLE_COUNT = 3000
+COSTS_SAMPLE_COUNT = 2000
+VISION_SOURCE_FILES = ("vision.py", "symbols.py", "overprint.py", "reference.py",
+                       "ocr.py", "protocol.py", "geometry.py", "schemas.json")
 
-from dirmap import store  # noqa: E402
+
+def vision_source_hash():
+    package = Path(service.__file__).resolve().parent
+    digest = hashlib.sha256()
+    for name in VISION_SOURCE_FILES:
+        path = package / name
+        if not path.is_file():
+            raise ValueError(f"缺少参考实现源文件 dirmap/{name}")
+        digest.update(name.encode("utf-8"))
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+from dirmap import service, store  # noqa: E402
 from dirmap.geometry import Frame, Registration  # noqa: E402
 from dirmap.optimizer import solve  # noqa: E402
 from dirmap.protocol import ROUTING_SCHEMA, TERRAIN_SCHEMA  # noqa: E402
+from dirmap.reference import load_reference  # noqa: E402
+from dirmap.vision import analyze, read_image  # noqa: E402
 
 
 class Report:
@@ -283,8 +305,8 @@ def verify_samples(report, asset_id, metadata, rebuilt, count):
 def verify_map(report, asset_id, catalog_entry, summaries):
     directory = OUT / "maps" / asset_id
     state_path = directory / "state.json"
-    for name in ("state.json", "original.jpg", "overlay.png", "terrain-warp.png",
-                 "terrain.png", "approaches.json", "graph.json", "graph.bin.gz"):
+    for name in ("state.json", "original.jpg", "original.png", "overlay.png", "terrain-warp.png",
+                 "terrain.png", "semantics.bin.gz", "approaches.json", "graph.json", "graph.bin.gz"):
         if not report.check((directory / name).is_file(), f"{asset_id}: 缺少 {name}"):
             return
     source_state = load_json(SOURCE / asset_id / "state.json")
@@ -369,6 +391,7 @@ def verify_map(report, asset_id, catalog_entry, summaries):
                  f"{asset_id}: original.jpg 哈希与 catalog 不符")
     report.equal(sha256_file(directory / "original.jpg"), source_state.get("sourceHash"),
                  f"{asset_id}: original.jpg 哈希与源 state 不符")
+    processing_sizes = verify_processing_inputs(report, asset_id, state, source_state, directory)
     source_controls = source_state.get("controls") or []
     baked_controls = state.get("controls") or []
     report.equal([control.get("id") for control in baked_controls],
@@ -444,6 +467,8 @@ def verify_map(report, asset_id, catalog_entry, summaries):
         "components": rebuilt["componentCount"],
         "approaches": f"{ok_count}/{len(wanted)}",
         "graph_size": (directory / "graph.bin.gz").stat().st_size,
+        "png_size": processing_sizes.get("png", 0),
+        "semantics_size": processing_sizes.get("semantics", 0),
         "graph_hash": graph_metadata.get("graphHash"),
     }
     # Matrix fixture.
@@ -552,6 +577,298 @@ def verify_dijkstra_fixture(report, asset_id, fixture, graph_metadata, pixels):
 
 
 # --------------------------------------------------------------------------- #
+# C.5 processing inputs: lossless original PNG, semantics bundle, client goldens.
+# --------------------------------------------------------------------------- #
+
+
+def parse_semantics(path):
+    compressed = Path(path).read_bytes()
+    if compressed[:2] != b"\x1f\x8b":
+        raise ValueError("semantics.bin.gz 不是 gzip 流")
+    data = gzip.decompress(compressed)
+    if data[:6] != SEMANTICS_MAGIC:
+        raise ValueError(f"semantics magic 不是 {SEMANTICS_MAGIC!r}")
+    version, = struct.unpack_from("<H", data, 6)
+    width, height, count = struct.unpack_from("<IIB", data, 8)
+    offset = 17
+    names = []
+    for _ in range(count):
+        if offset >= len(data):
+            raise ValueError("语义文件名称表被截断")
+        length = data[offset]
+        offset += 1
+        names.append(data[offset:offset + length].decode("utf-8"))
+        offset += length
+    mask_bytes = (width * height + 7) // 8
+    expected = offset + count * mask_bytes
+    if len(data) != expected:
+        raise ValueError(f"语义文件长度 {len(data)} != 表头+掩码 {expected}")
+    masks = {}
+    for name in names:
+        chunk = np.frombuffer(data, dtype=np.uint8, count=mask_bytes, offset=offset)
+        offset += mask_bytes
+        unpacked = np.unpackbits(chunk, bitorder="little")[:width * height]
+        masks[name] = unpacked.reshape((height, width)).astype(bool)
+    return {"version": version, "width": width, "height": height, "names": names, "masks": masks}
+
+
+def verify_processing_inputs(report, asset_id, state, source_state, directory):
+    label = f"{asset_id}: original.png"
+    png_path = directory / "original.png"
+    semantics_path = directory / "semantics.bin.gz"
+    if not report.check(png_path.is_file(), f"{label} 不存在"):
+        return {}
+    report.check(png_path.stat().st_size < MAX_DATA_FILE_BYTES, f"{label} 超过 100 MB")
+    image = read_image(store.get_asset(asset_id)["path"])
+    png = cv2.imdecode(np.fromfile(str(png_path), dtype=np.uint8), cv2.IMREAD_COLOR)
+    if not report.check(png is not None, f"{label} 无法解码"):
+        return {}
+    report.equal(png.shape, image.shape, f"{label} 尺寸")
+    report.equal(png.shape[1], state.get("width"), f"{label} 宽度")
+    report.equal(png.shape[0], state.get("height"), f"{label} 高度")
+    report.equal(hashlib.sha256(png.tobytes()).hexdigest(),
+                 hashlib.sha256(image.tobytes()).hexdigest(),
+                 f"{label} 像素哈希与 vision.read_image 不一致")
+    report.check(np.array_equal(png, image), f"{label} 像素与 cv2 JPEG 解码不一致")
+    label_sem = f"{asset_id}: semantics.bin.gz"
+    if not report.check(semantics_path.is_file(), f"{label_sem} 不存在"):
+        return {"png": png_path.stat().st_size}
+    report.check(semantics_path.stat().st_size < MAX_DATA_FILE_BYTES, f"{label_sem} 超过 100 MB")
+    try:
+        semantics = parse_semantics(semantics_path)
+    except (OSError, ValueError) as error:
+        report.check(False, f"{label_sem} 解析失败: {error}")
+        return {"png": png_path.stat().st_size}
+    report.equal(semantics["version"], 1, f"{label_sem}.version")
+    report.equal((semantics["width"], semantics["height"]),
+                 (state.get("width"), state.get("height")), f"{label_sem} 画幅")
+    report.equal(semantics["names"], list(SEMANTICS_NAMES), f"{label_sem} 掩码名称/顺序")
+    terrain_path = store.artifact_path(source_state, "terrain.npz")
+    with np.load(terrain_path) as artifact:
+        for name in SEMANTICS_NAMES:
+            if not report.check(name in artifact, f"{label_sem}: terrain.npz 缺少 {name}"):
+                continue
+            source_mask = np.asarray(artifact[name], dtype=bool)
+            report.check(np.array_equal(semantics["masks"].get(name), source_mask),
+                         f"{label_sem}: 掩码 {name} 与 terrain.npz 不一致")
+    return {"png": png_path.stat().st_size, "semantics": semantics_path.stat().st_size}
+
+
+def verify_reference_features(report):
+    label = "reference-features.json"
+    path = OUT / label
+    if not report.check(path.is_file(), f"{label} 不存在"):
+        return 0
+    report.check(path.stat().st_size < MAX_DATA_FILE_BYTES, f"{label} 超过 100 MB")
+    payload = load_json(path)
+    frame = payload.get("frame") or {}
+    report.equal(frame.get("crs"), "WGS84", f"{label}.frame.crs")
+    report.equal(frame.get("unit"), "metre", f"{label}.frame.unit")
+    report.equal(frame.get("axes"), "east_north", f"{label}.frame.axes")
+    origin = frame.get("origin")
+    if report.check(finite_point(origin), f"{label}.frame.origin 无效"):
+        report.check(abs(origin[0] - Frame().lng) < 1e-9 and abs(origin[1] - Frame().lat) < 1e-9,
+                     f"{label}.frame.origin 与 Frame 原点不符")
+    features = payload.get("features")
+    if not report.check(isinstance(features, list) and len(features) > 0, f"{label}.features 为空"):
+        return 0
+    counts = {}
+    for index, feature in enumerate(features):
+        label_feature = f"{label}.features[{index}]"
+        if not report.check(isinstance(feature, dict), f"{label_feature} 不是对象"):
+            continue
+        report.check(isinstance(feature.get("id"), str) and feature["id"], f"{label_feature}.id")
+        kind = feature.get("kind")
+        report.check(kind in ("building", "water", "pitch"), f"{label_feature}.kind 无效: {kind!r}")
+        counts[kind] = counts.get(kind, 0) + 1
+        report.check(finite_point(feature.get("center")), f"{label_feature}.center 无效")
+        report.check(finite_number(feature.get("area")) and feature["area"] > 0, f"{label_feature}.area 无效")
+        report.check(finite_number(feature.get("aspect")) and feature["aspect"] > 0,
+                     f"{label_feature}.aspect 无效")
+        points = feature.get("points")
+        report.check(isinstance(points, list) and len(points) >= 3
+                     and all(finite_point(point) for point in points), f"{label_feature}.points 无效")
+    reference = load_reference(service.reference_path())
+    expected_counts, expected_ids = {}, []
+    for feature in reference:
+        if feature.get("kind") not in ("building", "water", "pitch"):
+            continue
+        expected_counts[feature["kind"]] = expected_counts.get(feature["kind"], 0) + 1
+        expected_ids.append(str(feature["id"]))
+    report.equal([feature.get("id") for feature in features], expected_ids, f"{label}: 地物 id/顺序")
+    report.equal(counts, expected_counts, f"{label}: 各地物类型数量")
+    return len(features)
+
+
+def _check_samples(report, label, samples, count, width, height, value_check):
+    if not report.check(isinstance(samples, list) and len(samples) == count,
+                        f"{label} 应为 {count} 条，实际 {len(samples) if isinstance(samples, list) else samples}"):
+        return
+    seen = set()
+    for index, sample in enumerate(samples):
+        if not report.check(isinstance(sample, dict), f"{label}[{index}] 不是对象"):
+            continue
+        x, y, value = sample.get("x"), sample.get("y"), sample.get("v")
+        if not report.check(isinstance(x, int) and isinstance(y, int)
+                            and 0 <= x < width and 0 <= y < height,
+                            f"{label}[{index}] 坐标越界: {x},{y}"):
+            continue
+        seen.add((x, y))
+        value_check(f"{label}[{index}]", x, y, value)
+    report.equal(len(seen), count, f"{label} 坐标应互不重复")
+
+
+def _verify_coordinates(report, label, coordinates, count, width, height):
+    if not report.check(isinstance(coordinates, list) and len(coordinates) == count,
+                        f"{label} 应为 {count} 个坐标，实际 "
+                        f"{len(coordinates) if isinstance(coordinates, list) else coordinates}"):
+        return None
+    seen = set()
+    for index, item in enumerate(coordinates):
+        if not report.check(isinstance(item, dict) and isinstance(item.get("x"), int)
+                            and isinstance(item.get("y"), int)
+                            and 0 <= item["x"] < width and 0 <= item["y"] < height,
+                            f"{label}[{index}] 坐标越界"):
+            return None
+        seen.add((item["x"], item["y"]))
+    report.equal(len(seen), count, f"{label} 坐标应互不重复")
+    return [(item["x"], item["y"]) for item in coordinates]
+
+
+def verify_client_processing(report):
+    label = "tests/fixtures/static/client-processing.json"
+    path = FIXTURES / "client-processing.json"
+    if not report.check(path.is_file(), f"{label} 不存在"):
+        return None
+    report.check(path.stat().st_size < MAX_FIXTURE_BYTES, f"{label} 超过 2 MB")
+    fixture = load_json(path)
+    report.check(isinstance(fixture.get("sampling"), dict), f"{label}.sampling")
+    report.check(isinstance(fixture.get("note"), str) and fixture["note"], f"{label}.note")
+    maps = fixture.get("maps")
+    if not report.check(isinstance(maps, list), f"{label}.maps 不是列表"):
+        return None
+    report.equal([entry.get("assetId") for entry in maps], list(MAP_IDS), f"{label}.maps 顺序")
+    current_code_hash = vision_source_hash()
+    for entry in maps:
+        asset_id = entry.get("assetId")
+        source_state = load_json(SOURCE / asset_id / "state.json")
+        label_map = f"{label}[{asset_id}]"
+        width, height = source_state["width"], source_state["height"]
+        report.equal(entry.get("width"), width, f"{label_map}.width")
+        report.equal(entry.get("height"), height, f"{label_map}.height")
+        controls = entry.get("controls")
+        source_controls = source_state["controls"]
+        if report.check(isinstance(controls, list) and len(controls) == len(source_controls),
+                        f"{label_map}.controls 数量"):
+            for index, (control, source) in enumerate(zip(controls, source_controls)):
+                label_control = f"{label_map}.controls[{index}]"
+                report.equal(control.get("id"), source.get("id"), f"{label_control}.id")
+                report.equal(control.get("label"), source.get("label"), f"{label_control}.label")
+                report.equal(control.get("role", "control"), source.get("role", "control"),
+                             f"{label_control}.role")
+                report.equal(control.get("state"), source.get("state"), f"{label_control}.state")
+                report.equal(control.get("labelSource"), source.get("labelSource"),
+                             f"{label_control}.labelSource")
+                report.check(finite_point(control.get("pixel")), f"{label_control}.pixel 无效")
+                if finite_point(control.get("pixel")):
+                    report.check(np.allclose(control["pixel"], source["pixel"], rtol=0, atol=0),
+                                 f"{label_control}.pixel 与 state 不一致")
+                report.check(finite_number(control.get("radiusPx"))
+                             and abs(float(control["radiusPx"]) - float(source.get("radiusPx") or 0)) < 1e-9,
+                             f"{label_control}.radiusPx 与 state 不一致")
+        samples = entry.get("samples") or {}
+        blocked_coordinates = _verify_coordinates(
+            report, f"{label_map}.samples.blocked", samples.get("blocked"),
+            BLOCKED_SAMPLE_COUNT, width, height)
+        costs_coordinates = _verify_coordinates(
+            report, f"{label_map}.samples.costs", samples.get("costs"),
+            COSTS_SAMPLE_COUNT, width, height)
+        terrain_path = store.artifact_path(source_state, "terrain.npz")
+        with np.load(terrain_path) as artifact:
+            costs = np.asarray(artifact["costs"], dtype=np.float32)
+        blocked_path = store.artifact_path(source_state, "blocked.png")
+        blocked = cv2.imread(str(blocked_path), cv2.IMREAD_GRAYSCALE)
+        if not report.check(blocked is not None and blocked.shape == costs.shape,
+                            f"{label_map}: 源 blocked.png 缺失或尺寸不一致"):
+            continue
+        # --- secondary tolerance block: committed baked artifacts ---
+        artifact_block = entry.get("artifact")
+        if report.check(isinstance(artifact_block, dict), f"{label_map}.artifact 不是对象"):
+            statistics = source_state.get("statistics") or {}
+            artifact_counts = artifact_block.get("featureCounts") or {}
+            report.equal(artifact_counts.get("building"), statistics.get("buildingCandidates"),
+                         f"{label_map}.artifact.featureCounts.building 与 state.statistics 不一致")
+            report.equal(artifact_counts.get("water"), statistics.get("waterCandidates"),
+                         f"{label_map}.artifact.featureCounts.water 与 state.statistics 不一致")
+            report.check("pitch" not in artifact_counts,
+                         f"{label_map}.artifact.featureCounts 无 pitch 计数（旧工件未保存）")
+            report.equal(artifact_block.get("statistics"), statistics,
+                         f"{label_map}.artifact.statistics 与 state.statistics 不一致")
+            report.equal(artifact_block.get("forbiddenPixelFraction"),
+                         statistics.get("forbiddenPixelFraction"),
+                         f"{label_map}.artifact.forbiddenPixelFraction")
+            blocked_values = artifact_block.get("blockedSampleValues")
+            if (blocked_coordinates is not None
+                    and report.check(isinstance(blocked_values, list)
+                                     and len(blocked_values) == BLOCKED_SAMPLE_COUNT,
+                                     f"{label_map}.artifact.blockedSampleValues 数量")):
+                for index, (x, y) in enumerate(blocked_coordinates):
+                    report.equal(blocked_values[index], int(blocked[y, x]),
+                                 f"{label_map}.artifact.blockedSampleValues[{index}]")
+            cost_values = artifact_block.get("costsSampleValues")
+            if (costs_coordinates is not None
+                    and report.check(isinstance(cost_values, list)
+                                     and len(cost_values) == COSTS_SAMPLE_COUNT,
+                                     f"{label_map}.artifact.costsSampleValues 数量")):
+                for index, (x, y) in enumerate(costs_coordinates):
+                    report.check(np.float32(cost_values[index]) == costs[y, x],
+                                 f"{label_map}.artifact.costsSampleValues[{index}]")
+        # --- primary golden: current reference implementation ---
+        reference = entry.get("referenceImplementation")
+        if not report.check(isinstance(reference, dict), f"{label_map}.referenceImplementation 不是对象"):
+            continue
+        if report.check(isinstance(reference.get("controls"), list),
+                        f"{label_map}.referenceImplementation.controls 不是列表"):
+            report.equal(reference.get("controls"), controls,
+                         f"{label_map}.referenceImplementation.controls 与共享 controls 不一致")
+        report.equal(reference.get("generatedBy"), "dirmap.vision.analyze",
+                     f"{label_map}.referenceImplementation.generatedBy")
+        report.equal(reference.get("sourceCodeHash"), current_code_hash,
+                     f"{label_map}.referenceImplementation.sourceCodeHash 与当前参考代码不符")
+        analysis = analyze(read_image(store.get_asset(asset_id)["path"]), labeler=None)
+        counts = {"building": 0, "water": 0, "pitch": 0}
+        for feature in analysis["features"]:
+            if feature["kind"] in counts:
+                counts[feature["kind"]] += 1
+        report.equal(reference.get("featureCounts"), counts,
+                     f"{label_map}.referenceImplementation.featureCounts")
+        report.equal(reference.get("statistics"), analysis["statistics"],
+                     f"{label_map}.referenceImplementation.statistics")
+        report.equal(reference.get("forbiddenPixelFraction"),
+                     analysis["statistics"]["forbiddenPixelFraction"],
+                     f"{label_map}.referenceImplementation.forbiddenPixelFraction")
+        reference_blocked = np.asarray(analysis["blocked"])
+        reference_costs = np.asarray(analysis["costs"], dtype=np.float32)
+        blocked_values = reference.get("blockedSampleValues")
+        if (blocked_coordinates is not None
+                and report.check(isinstance(blocked_values, list)
+                                 and len(blocked_values) == BLOCKED_SAMPLE_COUNT,
+                                 f"{label_map}.referenceImplementation.blockedSampleValues 数量")):
+            for index, (x, y) in enumerate(blocked_coordinates):
+                report.equal(blocked_values[index], int(reference_blocked[y, x]),
+                             f"{label_map}.referenceImplementation.blockedSampleValues[{index}]")
+        cost_values = reference.get("costsSampleValues")
+        if (costs_coordinates is not None
+                and report.check(isinstance(cost_values, list)
+                                 and len(cost_values) == COSTS_SAMPLE_COUNT,
+                                 f"{label_map}.referenceImplementation.costsSampleValues 数量")):
+            for index, (x, y) in enumerate(costs_coordinates):
+                report.check(np.float32(cost_values[index]) == reference_costs[y, x],
+                             f"{label_map}.referenceImplementation.costsSampleValues[{index}]")
+    return fixture
+
+
+# --------------------------------------------------------------------------- #
 # Global checks: catalog, health, reference, releases, optimizer fixture.
 # --------------------------------------------------------------------------- #
 
@@ -587,8 +904,8 @@ def verify_catalog(report, summaries):
         report.check(isinstance(entry.get("version"), int), f"{label_map}.version 无效")
         report.check(isinstance(entry.get("controls"), int) and entry["controls"] > 0,
                      f"{label_map}.controls 无效")
-        for name in ("state.json", "original.jpg", "overlay.png", "terrain-warp.png",
-                     "terrain.png", "approaches.json", "graph.json", "graph.bin.gz"):
+        for name in ("state.json", "original.jpg", "original.png", "overlay.png", "terrain-warp.png",
+                     "terrain.png", "semantics.bin.gz", "approaches.json", "graph.json", "graph.bin.gz"):
             report.check((OUT / "maps" / asset_id / name).is_file(), f"{label_map}: 缺少 {name}")
         report.check((OUT / "maps" / asset_id / "original.jpg").is_file()
                      and sha256_file(OUT / "maps" / asset_id / "original.jpg") == entry.get("sha256"),
@@ -818,7 +1135,8 @@ def verify_fixture_sizes(report):
 def print_summary(report, summaries, catalog):
     print()
     print("静态数据摘要")
-    print(f"{'地图':<8}{'画幅':<12}{'节点':>9}{'有向边':>10}{'连通块':>8}{'到访点':>8}{'graph.bin.gz':>14}  图哈希")
+    print(f"{'地图':<8}{'画幅':<12}{'节点':>9}{'有向边':>10}{'连通块':>8}{'到访点':>8}"
+          f"{'graph.bin.gz':>13}{'original.png':>13}{'semantics':>11}  图哈希")
     for asset_id in MAP_IDS:
         summary = summaries.get(asset_id)
         if not summary:
@@ -826,10 +1144,23 @@ def print_summary(report, summaries, catalog):
             continue
         print(f"{asset_id:<8}{str(summary['width']) + 'x' + str(summary['height']):<12}"
               f"{summary['nodes']:>9}{summary['edges']:>10}{summary['components']:>8}"
-              f"{summary['approaches']:>8}{human_size(summary['graph_size']):>14}  {summary['graph_hash']}")
+              f"{summary['approaches']:>8}{human_size(summary['graph_size']):>13}"
+              f"{human_size(summary.get('png_size', 0)):>13}"
+              f"{human_size(summary.get('semantics_size', 0)):>11}  {summary['graph_hash']}")
     if catalog:
         print(f"目录地图 {len(catalog.get('maps') or [])} 张，图例 {len(catalog.get('legends') or [])} 个，"
               f"generatedAt {catalog.get('generatedAt')}")
+    reference_path = OUT / "reference-features.json"
+    if reference_path.is_file():
+        try:
+            count = len(load_json(reference_path).get("features") or [])
+        except (OSError, ValueError):
+            count = -1
+        print(f"reference-features.json {human_size(reference_path.stat().st_size)}，"
+              f"建筑/水体/球场地物 {count} 个")
+    client_path = FIXTURES / "client-processing.json"
+    if client_path.is_file():
+        print(f"client-processing.json {human_size(client_path.stat().st_size)}")
     fixture_size = sum(path.stat().st_size for path in FIXTURES.glob("*.json")) if FIXTURES.is_dir() else 0
     data_size = sum(path.stat().st_size for path in OUT.rglob("*") if path.is_file()) if OUT.is_dir() else 0
     print(f"数据 {human_size(data_size)}，fixtures {human_size(fixture_size)}，检查 {report.checks} 项")
@@ -853,6 +1184,8 @@ def main():
                 report.check(False, f"{asset_id}: 校验中断: {type(error).__name__}: {error}")
         verify_health(report)
         verify_reference(report)
+        reference_feature_total = verify_reference_features(report)
+        verify_client_processing(report)
         verify_releases(report, catalog)
         verify_optimizer_fixture(report)
         verify_fixture_sizes(report)

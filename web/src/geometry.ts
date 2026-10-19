@@ -18,6 +18,9 @@ export interface RegistrationData {
   source: Pixel[];
   target: Pixel[];
   triangles: number[][];
+  /** Optional raster dimensions for client-processed maps (browser builds). */
+  width?: number;
+  height?: number;
 }
 
 export { frameScales as localScales };

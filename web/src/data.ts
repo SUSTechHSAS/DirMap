@@ -6,6 +6,17 @@
  * `static-store.ts`).
  */
 import { escapeHtml, type Approach, type BakedApproaches, type BakedCatalog, type Control, type Health, type MapState, type Plan, type ReleaseSummary, type StaticRelease } from './types';
+import { hasLocalMap, loadLocalMap, localFileUrl, rememberLocalMaps, type LocalFileKind, type LocalMapSummary } from './workspace-store';
+
+/** Reference polygon used by the in-browser auto-registration matcher. */
+export interface ReferenceFeatureRecord {
+  id: string; kind: 'building' | 'water' | 'pitch';
+  center: [number, number]; area: number; aspect: number; points: [number, number][];
+}
+export interface ReferenceFeatures {
+  frame?: { crs?: string; origin?: [number, number] };
+  features: ReferenceFeatureRecord[];
+}
 
 /** Base URL of the application, always ending in '/'. */
 export const BASE: string = import.meta.env.BASE_URL;
@@ -37,7 +48,80 @@ export function legendUrl(url: string): string {
 
 /** URL of a release overlay: either frozen in the bundle or the map overlay. */
 export function releaseOverlayUrl(release: Pick<StaticRelease, 'assetId' | 'overlay'>): string {
-  return release.overlay ? dataUrl(release.overlay) : mapAssetUrl(release.assetId, 'overlay.png');
+  return release.overlay ? dataUrl(release.overlay) : assetUrl(release.assetId, 'overlay.png');
+}
+
+/** Map filenames to the locally stored asset kinds. */
+const LOCAL_FILE_KINDS: Record<string, LocalFileKind> = {
+  'original.png': 'original', 'original.jpg': 'original', 'overlay.png': 'overlay',
+  'terrain.png': 'terrain', 'terrain-warp.png': 'terrain-warp',
+};
+const localAssetUrls = new Map<string, string>();
+const preparedAssets = new Set<string>();
+
+/** Resolve the object URLs of locally processed/uploaded assets for a map. */
+export async function prepareLocalAssets(assetId: string): Promise<void> {
+  if (preparedAssets.has(assetId) || !hasLocalMap(assetId)) return;
+  const record = await loadLocalMap(assetId);
+  if (!record) return;
+  for (const kind of ['original', 'overlay', 'terrain', 'terrain-warp'] as LocalFileKind[]) {
+    const url = await localFileUrl(assetId, kind);
+    if (url) localAssetUrls.set(`${assetId}/${kind}`, url);
+  }
+  preparedAssets.add(assetId);
+}
+
+/** Invalidate cached object URLs (e.g. after re-processing a map). */
+export function invalidateLocalAssets(assetId: string): void {
+  preparedAssets.delete(assetId);
+  for (const key of localAssetUrls.keys()) if (key.startsWith(`${assetId}/`)) localAssetUrls.delete(key);
+}
+
+/** Synchronous asset URL: local object URL when available, baked URL otherwise. */
+export function assetUrl(assetId: string, file: string, version?: number): string {
+  const kind = LOCAL_FILE_KINDS[file];
+  if (kind) {
+    const local = localAssetUrls.get(`${assetId}/${kind}`);
+    if (local) return local;
+  }
+  return mapAssetUrl(assetId, file, version);
+}
+
+/** Merge client-processed/uploaded maps into the baked catalog. */
+export function mergeCatalog(catalog: BakedCatalog, localMaps: LocalMapSummary[]): BakedCatalog {
+  const overridden = new Set(localMaps.map(map => map.assetId));
+  const maps = catalog.maps.map(map => ({ ...map, local: overridden.has(map.id) }));
+  for (const local of localMaps) {
+    if (maps.some(map => map.id === local.assetId)) continue;
+    maps.push({
+      id: local.assetId, name: local.name, filename: local.filename, sha256: local.sha256,
+      processed: true, controls: null,
+      courseDefaults: null, hasGraph: false, hasApproaches: false, local: true, sourceKind: local.kind,
+    });
+  }
+  return { ...catalog, maps };
+}
+
+/** Whether a map id belongs to a locally stored map/processing result. */
+export function isLocalMap(assetId: string): boolean {
+  return hasLocalMap(assetId);
+}
+
+/** Decode the lossless native scan the browser pipeline uses as input. */
+export async function loadOriginalPng(assetId: string): Promise<Blob> {
+  const local = await localFileUrl(assetId, 'original');
+  if (local) {
+    const response = await fetch(local);
+    if (response.ok) return await response.blob();
+  }
+  const response = await fetch(mapDataUrl(assetId, 'original.png'));
+  if (!response.ok) throw new Error(`无法载入原图（${response.status}）：${assetId}`);
+  return await response.blob();
+}
+
+/** Add local maps to the object-URL registry at startup. */
+export function rememberLocalCatalog(): LocalMapSummary[] {
+  return rememberLocalMaps();
 }
 
 async function fetchJSON<T>(url: string): Promise<T> {
@@ -63,6 +147,10 @@ export async function loadReference(): Promise<object> {
 export async function loadMapState(assetId: string): Promise<MapState | null> {
   try { return await fetchJSON<MapState>(mapDataUrl(assetId, 'state.json')); }
   catch { return null; }
+}
+
+export async function loadReferenceFeatures(): Promise<ReferenceFeatures> {
+  return await fetchJSON<ReferenceFeatures>(staticUrl('reference-features.json'));
 }
 
 export async function loadApproaches(assetId: string): Promise<BakedApproaches | null> {

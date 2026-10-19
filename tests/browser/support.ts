@@ -154,3 +154,161 @@ export async function waitForDirmapHook(page: Page): Promise<void> {
 export function labelsOf(state: { controls: { id: string; label: string }[] }): Map<string, string> {
   return new Map(state.controls.map(control => [control.id, control.label]));
 }
+
+// ---------------------------------------------------------------------------
+// In-browser pipeline (?e2e=1) helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * The deterministic `window.dirmap` hook exposed by the production build when
+ * the URL carries `?e2e=1` (see web/src/main.ts). Only the members the browser
+ * suite uses are typed here.
+ */
+export interface DirmapHook {
+  getState: () => { controls: { id: string; label: string; role?: string; pixel: number[]; lnglat?: number[]; calibrated?: boolean }[]; width: number; height: number; version: number; graphHash?: string | null; registration?: unknown; extent?: number[] } | null;
+  getRelease: () => Record<string, any> | null;
+  getPlan: () => Record<string, any> | null;
+  getLocalRecord: () => { summary: { assetId: string; kind: string }; state: Record<string, any>; approaches?: { controls?: Record<string, any> } } | null;
+  getCatalog: () => { maps: { id: string; local?: boolean; processed?: boolean; controls?: number | null }[]; legends: unknown[] };
+  getClientPlanner: (record: unknown, progress?: (percent: number, message: string) => void) => Promise<{ graphHash: string; navigate: (...args: any[]) => Promise<any> }>;
+  processCurrent: () => Promise<void>;
+  uploadBlob: (blob: Blob, name: string) => Promise<void>;
+  campusMap: { map: { getView: () => { getAnimating: () => boolean }; getPixelFromCoordinate: (coordinate: number[]) => [number, number] } };
+}
+
+declare global {
+  interface Window {
+    dirmap?: DirmapHook;
+  }
+}
+
+/** Navigate to the teacher workbench with the deterministic E2E hook enabled. */
+export async function gotoTeacherWithHook(page: Page, path = '/?e2e=1'): Promise<void> {
+  await page.goto(path);
+  await waitForTeacherApp(page);
+  expect(await page.evaluate(() => Boolean((window as Window).dirmap?.getState))).toBe(true);
+}
+
+/** Select a map card through a real click and wait until its async task finished. */
+export async function selectMap(page: Page, id: string): Promise<void> {
+  await expect(page.locator('#process-current')).toBeEnabled({ timeout: 60_000 });
+  await page.locator(`[data-map="${id}"]`).click();
+  await page.waitForFunction(id => document.querySelector<HTMLElement>('.map-card.active')?.dataset.map === id, id, { timeout: 60_000 });
+  await waitForIdle(page);
+}
+
+/** Wait until the map view has finished its fit animation (screen-position math). */
+export async function waitForMapIdle(page: Page): Promise<void> {
+  await page.waitForFunction(() => !(window as Window).dirmap?.campusMap.map.getView().getAnimating(), undefined, { timeout: 30_000 });
+}
+
+/**
+ * Wait for a heavy in-browser pipeline task.
+ *
+ * The application shows `#job-status` while a pipeline stage reports progress and
+ * hides it in the task's `finally`. Cheap tasks may finish before we observe the
+ * visible state, so the "became visible" probe is best-effort.
+ */
+export async function waitForJob(page: Page, timeout = 240_000): Promise<void> {
+  await page
+    .waitForFunction(() => {
+      const element = document.querySelector('#job-status');
+      return Boolean(element && !element.classList.contains('hidden'));
+    }, undefined, { timeout: 20_000 })
+    .catch(() => { /* task was faster than the probe */ });
+  await page.waitForFunction(() => {
+    const element = document.querySelector('#job-status');
+    return Boolean(element && element.classList.contains('hidden'));
+  }, undefined, { timeout, polling: 250 });
+}
+
+/** Run in-browser recognition + registration for the active map through the UI. */
+export async function processCurrentMap(page: Page): Promise<number> {
+  const startedAt = Date.now();
+  await page.locator('#process-current').click();
+  await waitForJob(page);
+  return (Date.now() - startedAt) / 1000;
+}
+
+export interface PlannedRouteSummary {
+  teamId: string;
+  controlIds: string[];
+  distanceM: number;
+  durationSec: number;
+}
+
+export interface PlanSummary {
+  status: string;
+  graphHash: string;
+  routes: PlannedRouteSummary[];
+  approaches: { controlId: string; lnglat?: number[]; automatic?: boolean }[];
+  /** Unresolved points found on each NEEDS_REVIEW attempt (before unchecking). */
+  rejected: { id: string; message: string }[][];
+}
+
+/**
+ * Plan a course, automatically excluding controls the planner reports as
+ * unreachable/ambiguous (e.g. client-processed szu-2 has an unreachable target).
+ *
+ * This is exactly the teacher workflow: plan → read "这些位置需要核对后再规划"
+ * → uncheck those rows → plan again. It returns the first successful plan.
+ */
+export async function planReachableSubset(page: Page, options: { people?: number; teams?: number } = {}): Promise<PlanSummary> {
+  const people = options.people ?? 6;
+  const teams = options.teams ?? 2;
+  await page.locator('[data-tab="course"]').click();
+  await page.locator('#people').fill(String(people));
+  await page.locator('#teams').fill(String(teams));
+  const rejected: { id: string; message: string }[][] = [];
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    await expect(page.locator('#plan-button')).toBeEnabled({ timeout: 60_000 });
+    await page.locator('#plan-button').click();
+    await page.waitForFunction(() => {
+      const plan = (window as Window).dirmap?.getPlan();
+      return Boolean(plan && ['OPTIMAL', 'FEASIBLE', 'NEEDS_REVIEW'].includes(String(plan.status)));
+    }, undefined, { timeout: 180_000 });
+    const plan = await page.evaluate<PlanSummary & { status: string; unresolved: { id: string; message: string }[] }>(() => {
+      const current = (window as Window).dirmap!.getPlan()!;
+      return {
+        status: String(current.status),
+        graphHash: String(current.graphHash),
+        routes: (current.routes as any[]).map(route => ({ teamId: route.teamId, controlIds: route.controlIds, distanceM: route.distanceM, durationSec: route.durationSec })),
+        approaches: ((current.approaches ?? []) as any[]).map(approach => ({ controlId: approach.controlId, lnglat: approach.lnglat, automatic: approach.automatic })),
+        rejected: [],
+        unresolved: ((current.unresolved ?? []) as any[]).map(item => ({ id: item.id, message: item.message })),
+      };
+    });
+    if (plan.status !== 'NEEDS_REVIEW') return { status: plan.status, graphHash: plan.graphHash, routes: plan.routes, approaches: plan.approaches, rejected };
+    rejected.push(plan.unresolved);
+    const state = await page.evaluate(() => (window as Window).dirmap!.getState()!);
+    const labelById = new Map(state.controls.map(control => [control.id, control.label]));
+    for (const item of plan.unresolved) {
+      const label = labelById.get(item.id);
+      if (label === undefined) throw new Error(`Planner reports unresolved "${item.id}" (${item.message}) which is not a selectable control row; cannot plan a reachable subset.`);
+      const rows = page.locator('.control-row');
+      const count = await rows.count();
+      let unchecked = false;
+      for (let index = 0; index < count; index += 1) {
+        const row = rows.nth(index);
+        const input = row.locator('[data-required]');
+        if (await input.count() === 0 || await input.isDisabled()) continue;
+        if ((await row.locator('.control-number').innerText()).trim() === label) {
+          await input.uncheck();
+          unchecked = true;
+          break;
+        }
+      }
+      if (!unchecked) throw new Error(`Cannot find the control row for unresolved label "${label}".`);
+    }
+  }
+  throw new Error(`Plan stayed NEEDS_REVIEW after unchecking every reported point: ${JSON.stringify(rejected)}`);
+}
+
+/** Compute the screen point of a WGS84 coordinate inside the OL map viewport. */
+export async function mapPointForLngLat(page: Page, lnglat: number[]): Promise<[number, number]> {
+  return await page.evaluate(lnglat => {
+    const lon = lnglat[0] * Math.PI / 180 * 6378137;
+    const lat = Math.log(Math.tan(Math.PI / 4 + lnglat[1] * Math.PI / 360)) * 6378137;
+    return (window as Window).dirmap!.campusMap.map.getPixelFromCoordinate([lon, lat]);
+  }, lnglat);
+}

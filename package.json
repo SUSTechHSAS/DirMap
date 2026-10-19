@@ -9,17 +9,25 @@
     "build:pages": "tsc --noEmit && vite build --config web/vite.config.ts",
     "preview": "vite preview --config web/vite.config.ts",
     "bake": "PYTHONPATH=.pydeps DIRMAP_CACHE_DIR=$PWD/.cache python3 tools/bake_static.py",
-    "test": "node --experimental-strip-types --test tests/*.test.ts tests/static/*.test.ts",
+    "test": "node --experimental-strip-types --test tests/*.test.ts tests/static/*.test.ts tests/client/*.test.ts",
     "test:static": "node --experimental-strip-types --test tests/static/*.test.ts",
     "test:browser": "playwright test",
-    "setup:bake": "python3 -m pip install --target .pydeps -r requirements.txt"
+    "setup:bake": "python3 -m pip install --target .pydeps -r requirements.txt",
+    "vendor:assets": "node tools/vendor-assets.mjs",
+    "prepare": "node tools/vendor-assets.mjs",
+    "prebuild": "node tools/vendor-assets.mjs",
+    "test:client": "node --experimental-strip-types --test tests/client/*.test.ts"
   },
   "dependencies": {
-    "ol": "^10.7.0"
+    "@techstark/opencv-js": "4.11.0-release.1",
+    "ol": "^10.7.0",
+    "tesseract.js": "6.0.1"
   },
   "devDependencies": {
-    "vite": "^7.1.0",
+    "@playwright/test": "^1.58.0",
+    "@types/pngjs": "6.0.5",
+    "pngjs": "7.0.0",
     "typescript": "^5.9.0",
-    "@playwright/test": "^1.58.0"
+    "vite": "^7.1.0"
   }
 }

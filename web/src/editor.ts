@@ -1,5 +1,5 @@
 import { escapeHtml, type Approach, type Control, type MapState, type Pixel, type TerrainEdit } from './types';
-import { mapAssetUrl } from './data';
+import { assetUrl } from './data';
 
 type Mode = 'inspect' | 'control' | 'approach' | 'open' | 'close' | 'anchor';
 export class PixelEditor {
@@ -47,8 +47,8 @@ export class PixelEditor {
     this.canvas.onpointermove = event => { if (this.stroke) { this.stroke.push(this.pixel(event)); this.draw(); } };
     this.canvas.onpointerup = () => this.endStroke();
     this.canvas.onpointercancel = () => this.endStroke();
-    this.image.onload = () => this.draw(); this.image.src = mapAssetUrl(this.state.assetId, 'original.jpg');
-    this.terrain.onload = () => this.draw(); this.terrain.src = mapAssetUrl(this.state.assetId, 'terrain.png', this.state.version);
+    this.image.onload = () => this.draw(); this.image.src = assetUrl(this.state.assetId, 'original.jpg');
+    this.terrain.onload = () => this.draw(); this.terrain.src = assetUrl(this.state.assetId, 'terrain.png', this.state.version);
     this.dialog.querySelector<HTMLButtonElement>('#save-edits')!.onclick = async () => {
       const button = this.dialog.querySelector<HTMLButtonElement>('#save-edits')!; button.disabled = true;
       try { await this.onSave(this.controls, this.edits); this.close(); }
