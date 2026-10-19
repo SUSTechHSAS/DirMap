@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite';
 import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
+import { execSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 
 const schemas = JSON.parse(readFileSync(new URL('../dirmap/schemas.json', import.meta.url), 'utf8'));
@@ -21,10 +22,19 @@ function normalizeBase(raw: string): string {
 
 const base = normalizeBase(process.env.DIRMAP_BASE || '/');
 
+/** Short commit that produced this build; shown in the in-app diagnostics. */
+const commit = (() => {
+  try { return execSync('git rev-parse --short HEAD', { cwd: fileURLToPath(new URL('..', import.meta.url)) }).toString().trim(); }
+  catch { return 'dev'; }
+})();
+
 export default defineConfig({
   root: fileURLToPath(new URL('.', import.meta.url)),
   base,
-  define: { __DIRMAP_ROUTING_SCHEMA__: JSON.stringify(schemas.routing) },
+  define: {
+    __DIRMAP_ROUTING_SCHEMA__: JSON.stringify(schemas.routing),
+    __DIRMAP_COMMIT__: JSON.stringify(commit),
+  },
   plugins: [{
     // The build inserts a content fingerprint so every new application refreshes
     // its offline shell, even when the service worker's logic itself has not

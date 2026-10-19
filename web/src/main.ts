@@ -85,7 +85,7 @@ $('objective').insertAdjacentHTML('beforeend', '<option value="min_distance">全
 $('course-mode').insertAdjacentHTML('beforeend', '<option value="mixed_coverage">全员必到 + 其余点全班分担</option>');
 $('course-mode').insertAdjacentHTML('afterend', '<div id="mixed-rules" class="quality-card hidden"><strong>混合访问规则</strong><p id="mixed-rule-summary"></p><p class="muted compact">在下方勾选“每队必到”；其余选中点由队伍分担。整队同行，每名队员都会经过本队必到点。</p><label class="check-label"><input id="mandatory-order" type="checkbox">指定每队必到点的先后顺序</label><div id="mandatory-order-list"></div><p id="mandatory-rule-error" class="danger"></p></div>');
 $<HTMLInputElement>('mandatory-order').onchange = () => { resetPlan(); persistRules(); renderState(); };
-$('sensor-status').insertAdjacentHTML('afterend', '<button id="calibrate-compass" class="text-button compass-calibration">校准罗盘</button>');
+$('sensor-status').insertAdjacentHTML('afterend', '<button id="calibrate-compass" class="text-button compass-calibration">校准罗盘</button><button id="open-diagnostics" class="text-button">定位诊断</button>');
 $('objective').insertAdjacentHTML('afterend', '<label class="field-label" for="solver-budget">规划计算预算</label><select id="solver-budget"><option value="5">快速规划 · 5 秒</option><option value="30">继续优化 · 30 秒</option></select>');
 $<HTMLSelectElement>('solver-budget').onchange = resetPlan;
 $('edit-terrain').insertAdjacentHTML('beforebegin', '<p class="muted">原图紫色连线只表示课程关系，不是实际道路。路线会按其下方的地形绕开水体、建筑和围墙。</p><button id="refresh-terrain" class="soft-button wide">更新通行识别（保留教师校核）</button>');
@@ -665,6 +665,62 @@ function simpleDialog(title: string, body: string): HTMLDialogElement {
   dialog.showModal();
   return dialog;
 }
+$('open-diagnostics').onclick = () => {
+  const dialog = document.createElement('dialog');
+  dialog.className = 'info-dialog diagnostics-dialog';
+  dialog.innerHTML = `<div class="dialog-heading"><h2>定位与朝向诊断</h2><button class="icon-button" data-close aria-label="关闭">×</button></div>
+    <p class="muted compact">构建 ${e(__DIRMAP_COMMIT__)} · 若线下回报问题请截图本页或点“复制诊断信息”。</p>
+    <pre id="diagnostics-body" class="diagnostics-body"></pre>
+    <button id="copy-diagnostics" class="soft-button wide">复制诊断信息</button>
+    <button id="force-update" class="primary-button wide">强制更新到最新版本</button>
+    <p class="muted compact">“强制更新”会清除本站离线缓存并重新加载；网络恢复后离线缓存会重新建立。</p>`;
+  document.body.append(dialog);
+  const pre = dialog.querySelector<HTMLPreElement>('#diagnostics-body')!;
+  let permission = '查询中…';
+  const permissionPromise = navigator.permissions?.query({ name: 'geolocation' as PermissionName })
+    .then(state => { permission = state.state; }).catch(() => { permission = '不可查询'; });
+  const update = () => {
+    const d = sensors.diagnostics();
+    const age = (time: number) => time ? `${Date.now() - time} ms` : '无';
+    pre.textContent = [
+      `构建: ${__DIRMAP_COMMIT__}`,
+      `页面: ${location.href}`,
+      `安全上下文: ${window.isSecureContext ? '是' : '否'}`,
+      `内嵌浏览器: ${IN_APP_BROWSER ? '是（微信/QQ 等，定位可能被禁用）' : '否'}`,
+      `定位权限: ${permission}`,
+      `定位接口: ${navigator.geolocation ? '有' : '无'}`,
+      `定位已启动: ${d.active ? '是' : '否'}   定时器/监看: ${d.watchId ?? 'null'}`,
+      `原始定位回调次数: ${d.rawPositionCount}   通过校验次数: ${d.acceptedPositionCount}`,
+      `最后原始时间戳距今: ${age(d.lastRawTimestamp)}`,
+      `最后通过校验距今: ${age(d.lastAcceptedReceivedAt)}`,
+      `最近定位错误: ${d.lastGeoError ?? '无'}`,
+      `朝向接口: ${d.orientationSupported ? '有' : '无'}   朝向权限: ${d.orientationPermissionGranted ? '已允许' : '未允许/未请求'}`,
+      `朝向事件: ${d.orientationEventCount}（其中绝对方向 ${d.absoluteEventCount}）   有效朝向样本: ${d.headingSampleCount}`,
+      `当前朝向: ${d.heading === null ? '无' : `${Math.round(d.heading)}°`}`,
+      `UA: ${navigator.userAgent}`,
+    ].join('\n');
+  };
+  void permissionPromise; update();
+  const timer = setInterval(update, 1000);
+  const close = () => { clearInterval(timer); dialog.close(); dialog.remove(); };
+  dialog.querySelector<HTMLButtonElement>('[data-close]')!.onclick = close;
+  dialog.addEventListener('cancel', close);
+  dialog.querySelector<HTMLButtonElement>('#copy-diagnostics')!.onclick = async (event) => {
+    const button = event.currentTarget as HTMLButtonElement;
+    try { await navigator.clipboard.writeText(pre.textContent ?? ''); button.textContent = '已复制'; }
+    catch { button.textContent = '复制失败，请截图'; }
+  };
+  dialog.querySelector<HTMLButtonElement>('#force-update')!.onclick = () => {
+    void (async () => {
+      try {
+        for (const name of await caches.keys()) await caches.delete(name);
+        const registrations = await navigator.serviceWorker?.getRegistrations?.() ?? [];
+        await Promise.all(registrations.map(registration => registration.unregister()));
+      } finally { location.reload(); }
+    })();
+  };
+  dialog.showModal();
+};
 $('calibrate-compass').onclick = () => {
   const dialog = simpleDialog('校准手机朝向', `<p>在开阔处平放手机，将屏幕上沿对准已知的真北方向。默认真北为 0°；也可以输入已知地物的方位角。</p><label class="field-label">已知方位角（顺时针，度）<input id="known-bearing" type="number" min="0" max="359" value="0"></label><p id="compass-calibration-error" class="danger" role="status"></p><button id="confirm-compass" class="primary-button wide">已对准，校准当前方向</button><button id="clear-compass-calibration" class="text-button wide">恢复设备原始方向</button><p class="muted">校准只影响罗盘；行进方向仍由定位数据计算。远离金属和磁铁后可重新校准。</p>`);
   dialog.querySelector<HTMLButtonElement>('#confirm-compass')!.onclick = () => {
@@ -673,7 +729,7 @@ $('calibrate-compass').onclick = () => {
   };
   dialog.querySelector<HTMLButtonElement>('#clear-compass-calibration')!.onclick = () => { sensors.clearCalibration(); dialog.close(); dialog.remove(); notify('已恢复设备方向'); };
 };
-$('open-help').onclick = () => simpleDialog('使用 DirMap', `<ol class="help-list"><li>在“课程地图”选择内置地图或导入自己的扫描图；点击“自动识别与配准”，识别、配准与通行图全部在浏览器内计算，构建时数据作为快速默认值。</li><li>在“原图校核”中核对目标编号、类型和到访位置；修改保存在本机浏览器，可随时删除本机处理结果恢复构建时数据。</li><li>核对围墙、门洞、禁区与桥隧；“更新通行识别”可在保留教师校核的前提下重算地形；“同名点”可修正局部配准偏差。</li><li>填写人数、队数与课程规则，选择起终点并生成路线；小规模课程使用精确动态规划，大规模使用时间预算内的可行解。</li><li>发布前确认课程；课程 JSON 与叠图保存在本机并下载。把课程与地图数据提交到站点数据目录后重新部署，其他设备即可打开课程链接。</li></ol><p class="muted">浏览器内处理依赖 WebAssembly 识别引擎与大图内存，手机处理大图可能较慢；离线时使用已缓存数据。标准地图及校园参照 © OpenStreetMap contributors。自动匹配误差不等价于现场精度。手机传感器需 HTTPS 和浏览器权限。</p>`);
+$('open-help').onclick = () => simpleDialog(`使用 DirMap · 构建 ${__DIRMAP_COMMIT__}`, `<ol class="help-list"><li>在“课程地图”选择内置地图或导入自己的扫描图；点击“自动识别与配准”，识别、配准与通行图全部在浏览器内计算，构建时数据作为快速默认值。</li><li>在“原图校核”中核对目标编号、类型和到访位置；修改保存在本机浏览器，可随时删除本机处理结果恢复构建时数据。</li><li>核对围墙、门洞、禁区与桥隧；“更新通行识别”可在保留教师校核的前提下重算地形；“同名点”可修正局部配准偏差。</li><li>填写人数、队数与课程规则，选择起终点并生成路线；小规模课程使用精确动态规划，大规模使用时间预算内的可行解。</li><li>发布前确认课程；课程 JSON 与叠图保存在本机并下载。把课程与地图数据提交到站点数据目录后重新部署，其他设备即可打开课程链接。</li></ol><p class="muted">浏览器内处理依赖 WebAssembly 识别引擎与大图内存，手机处理大图可能较慢；离线时使用已缓存数据。标准地图及校园参照 © OpenStreetMap contributors。自动匹配误差不等价于现场精度。手机传感器需 HTTPS 和浏览器权限。</p>`);
 $('review-button').onclick = () => {
   if (!state || !plan?.routes.length) return;
   const suggested = plan.approaches?.filter(approach => approach.automatic) ?? [];
