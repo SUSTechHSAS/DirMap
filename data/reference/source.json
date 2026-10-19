@@ -1,0 +1,17 @@
+{
+  "url": "https://overpass-api.de/api/interpreter",
+  "query": "[out:json][timeout:45];(way[\"building\"](22.521,113.920,22.547,113.946);way[\"natural\"=\"water\"](22.521,113.920,22.547,113.946);way[\"waterway\"](22.521,113.920,22.547,113.946);way[\"highway\"](22.521,113.920,22.547,113.946););out geom;",
+  "retrievedAt": "2026-10-15T00:42:39Z",
+  "copyright": "© OpenStreetMap contributors",
+  "license": "ODbL 1.0",
+  "crs": "WGS84",
+  "additionalSources": [
+    {
+      "file": "yuehai-osm-extra.json",
+      "url": "https://overpass-api.de/api/interpreter",
+      "query": "[out:json][timeout:45];(way[\"leisure\"=\"swimming_pool\"](22.526,113.922,22.545,113.941);relation[\"natural\"=\"water\"](22.526,113.922,22.545,113.941););out geom;",
+      "savedAt": "2026-10-15T01:06:55.590532+00:00",
+      "elements": 10
+    }
+  ]
+}

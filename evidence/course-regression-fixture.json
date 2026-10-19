@@ -1,0 +1,14 @@
+{
+  "assetId": "szu-3",
+  "sourceHash": "28a4a358bf853003839c187e708e546e2bcea08bbddbc2601184c780907ac16b",
+  "scope": "针对用户报告的课程连线误开通行问题，目视原图冻结的开发回归区域；不是独立现场通行或识别泛化基准。像素框为左闭右开。",
+  "mandatoryLabels": ["31", "32", "33"],
+  "sharedLabels": ["34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46"],
+  "defaultMandatoryOrder": false,
+  "blockedRegions": [
+    {"id": "large-lake-west-course-line", "kind": "water", "box": [627, 1800, 650, 1822]},
+    {"id": "large-lake-middle-course-line", "kind": "water", "box": [830, 1750, 875, 1790]},
+    {"id": "southwest-lake-course-line", "kind": "water", "box": [520, 1930, 545, 1955]},
+    {"id": "central-building-course-line", "kind": "building", "box": [1145, 1180, 1180, 1205]}
+  ]
+}

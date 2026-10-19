@@ -1,0 +1,74 @@
+{
+  "audited_at_utc": "2026-10-14T23:37:02.480953+00:00",
+  "scope": "User-requested implementation-plan exploration and decisions; not completed application delivery",
+  "verification": {
+    "original_asset_hashes_unchanged": 5,
+    "original_asset_total_bytes": 7175078,
+    "local_markdown_links_checked": 17,
+    "python_ast_parse": "passed",
+    "typescript_node_syntax_check": "passed; no tsc type check or runtime API implementation claimed",
+    "synthetic_probe_checks_passed": 21,
+    "probe_code_sha256": "f4e19296cea8f3ae43d1d1fed6e16a2ca3c8e8c461b49de0366f1a8eff9fc392",
+    "raster_pixels_decoded": false,
+    "new_dependency_installs": 0,
+    "codespace_started_or_created": false
+  },
+  "requirements": [
+    {
+      "requirement": "Automatic local registration, stitching, and control display on standard map",
+      "design_evidence": [
+        "design/implementation-plan.zh-CN.md sections 3-5",
+        "design/interfaces.ts",
+        "evidence/design-probe.json"
+      ],
+      "design_status": "complete",
+      "real_map_validation": "not performed"
+    },
+    {
+      "requirement": "Phone map orientation follows real direction",
+      "design_evidence": [
+        "design/implementation-plan.zh-CN.md section 6",
+        "design/validation-plan.zh-CN.md G7-G8",
+        "evidence/design-probe.json"
+      ],
+      "design_status": "complete",
+      "phone_validation": "not performed"
+    },
+    {
+      "requirement": "Recognize traversability and optimize routes by participants, teams, controls",
+      "design_evidence": [
+        "design/implementation-plan.zh-CN.md sections 7-8",
+        "design/interfaces.ts",
+        "evidence/design-probe.json"
+      ],
+      "design_status": "complete",
+      "real_image_and_ortools_validation": "not performed"
+    },
+    {
+      "requirement": "Use limited local disk, avoid direct image reading, investigate and settle implementation plan",
+      "design_evidence": [
+        "evidence/input-manifest.json",
+        "evidence/sources.md",
+        "design/validation-plan.zh-CN.md"
+      ],
+      "design_status": "complete"
+    }
+  ],
+  "added_files": [
+    "README.md",
+    "design/implementation-plan.zh-CN.md",
+    "design/interfaces.ts",
+    "design/validation-plan.zh-CN.md",
+    "evidence/design-probe.json",
+    "evidence/input-manifest.json",
+    "evidence/sources.md",
+    "evidence/workspace-audit.json",
+    "tools/design_probe.py",
+    "tools/inspect_inputs.py"
+  ],
+  "added_file_count": 10,
+  "added_regular_file_bytes_including_this_report": 90166,
+  "added_regular_file_allocated_bytes_including_this_report": 110592,
+  "added_regular_file_budget_bytes": 1048576,
+  "scope_limit": "Real image recognition, georeferencing accuracy, browser sensors, production solver integration and field trials remain implementation-stage acceptance work."
+}

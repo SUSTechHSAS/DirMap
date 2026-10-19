@@ -1,0 +1,73 @@
+# Deploy the static DirMap build to GitHub Pages.
+#
+# One-time repository setup (see DEPLOY.md):
+#   Settings -> Pages -> Build and deployment -> Source: GitHub Actions
+#
+# URL shapes and the base path:
+#   Project site   https://<user>.github.io/<repo>/   base = /<repo>/ (default below)
+#   User site      https://<user>.github.io/          base = /
+#   Custom domain  https://<domain>/                  base = /
+# To switch to a user site or a custom domain, change the DIRMAP_BASE value in
+# the "Build static site" step to `/` (and set the domain under Settings -> Pages).
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one Pages deployment may run at a time; never cancel a deploy midway.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run unit tests
+        run: npm test
+
+      - name: Build static site (project-site sub-path)
+        # `npm run build` runs `tsc --noEmit && vite build --config web/vite.config.ts`
+        # and writes web/dist. The Vite config reads DIRMAP_BASE; the service worker
+        # and every application data URL derive their prefix from it.
+        env:
+          DIRMAP_BASE: /${{ github.event.repository.name }}/
+        run: npm run build
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,19 @@
+✔ north crossing uses the short arc (3.211608ms)
+✔ absolute W3C orientation across cardinal directions and screen rotation (1.19091ms)
+✔ iOS magnetic north correction, accuracy and single landscape compensation (0.834438ms)
+✔ GNSS movement fallback needs stable fresh motion, static drift does not count (1.093143ms)
+✔ reject future and stale sensor events (0.569521ms)
+✔ iOS landscape compensation accounts for tilt and rejects a vertical top vector (0.737211ms)
+✔ a late sample cannot replace a fresher heading (0.473317ms)
+✔ known-bearing calibration needs a fresh compass and adjusts only its offset (3.569945ms)
+✔ polyline distance uses the closest segment, including duplicate vertices (3.124832ms)
+✔ off-route detection needs sustained accurate fresh fixes and a cooldown (1.695956ms)
+✔ completed legs no longer count as the remaining route; return leg survives all check-ins (2.622591ms)
+ℹ tests 11
+ℹ suites 0
+ℹ pass 11
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 427.695341

@@ -1,0 +1,8 @@
+{
+  "url": "https://overpass-api.de/api/interpreter",
+  "query": "[out:json][timeout:45];(way[\"leisure\"~\"^(pitch|track|stadium)$\"](22.526,113.922,22.544,113.941););out geom;",
+  "crs": "WGS84",
+  "license": "ODbL 1.0",
+  "attribution": "© OpenStreetMap contributors",
+  "retrievedAt": "2026-10-15T02:45:43Z"
+}

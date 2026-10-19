@@ -1,0 +1,13 @@
+{
+  "reviewedAt": "2026-10-18",
+  "scope": "Visual development inventory of the supplied source sheets. This checks readable labels and symbol counts; no independent circle-centre, geographic or field benchmark is claimed.",
+  "maps": [
+    {"id": "szu-1", "sourceHash": "32dc67e75f88bcee67e3a5f7d56cd18e81d0f5172b9a6f518cd4bab71a4487cc", "labels": ["31", "32", "33", "34", "35", "36", "37", "38", "39", "40"], "startFinishCount": 1},
+    {"id": "szu-2", "sourceHash": "dec799aba2b1904a6ceafbb589510086328663afeefa21dc91182690456fc3c6", "labels": ["31", "32", "33", "34", "35", "36"], "startFinishCount": 1},
+    {"id": "szu-3", "sourceHash": "28a4a358bf853003839c187e708e546e2bcea08bbddbc2601184c780907ac16b", "labels": ["31", "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46"], "startFinishCount": 1}
+  ],
+  "userDecisions": [
+    {"date": "2026-10-18", "assetId": "szu-2", "label": "35", "rule": "按图例禁入，保留该点待核验", "source": "Explicit user reply in the active goal thread", "effect": "Do not open the olive area or silently drop the required checkpoint to make a full route pass."}
+  ],
+  "legendObservation": "Both supplied legends mark olive-filled settlement/garden areas as out of bounds. The PDF separately shows walls, gates, point objects and two-level passage markings; complete automatic interpretation of all those symbols is not yet verified."
+}

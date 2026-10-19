@@ -1,0 +1,342 @@
+{
+  "auditedAt": "2026-10-19T03:03:57+0000",
+  "assets": [
+    "szu-1",
+    "szu-2",
+    "szu-3"
+  ],
+  "scope": "Detected course, one team, all controls required. Automatic approaches need review.",
+  "maps": [
+    {
+      "assetId": "szu-1",
+      "status": "ROUTABLE",
+      "routable": true,
+      "controls": 10,
+      "resolved": 10,
+      "unresolved": [],
+      "courseProblem": null,
+      "startFinish": {
+        "startLabel": "起终点",
+        "startPixel": [
+          1412.59,
+          406.79
+        ],
+        "finishLabel": "起终点",
+        "finishPixel": [
+          1412.59,
+          406.79
+        ],
+        "method": "detected_course_symbols"
+      },
+      "planStatus": "OPTIMAL",
+      "routes": [
+        {
+          "controlIds": [
+            "c5",
+            "c8",
+            "c9",
+            "c11",
+            "c10",
+            "c6",
+            "c7",
+            "c4",
+            "c3",
+            "c1"
+          ],
+          "distanceM": 3403.6,
+          "durationSec": 2499.0,
+          "checkedEdges": 1768
+        }
+      ],
+      "approaches": [
+        {
+          "controlId": "c1",
+          "method": "point_symbol_edge",
+          "automatic": true,
+          "offsetM": 4.774776301491623
+        },
+        {
+          "controlId": "c3",
+          "method": "exact",
+          "automatic": false,
+          "offsetM": 0.0
+        },
+        {
+          "controlId": "c4",
+          "method": "point_symbol_edge",
+          "automatic": true,
+          "offsetM": 0.9763006498607962
+        },
+        {
+          "controlId": "c5",
+          "method": "exact",
+          "automatic": false,
+          "offsetM": 0.0
+        },
+        {
+          "controlId": "c6",
+          "method": "compound_point_symbol_edge",
+          "automatic": true,
+          "offsetM": 4.7839565441303336
+        },
+        {
+          "controlId": "c7",
+          "method": "small_water_feature_edge",
+          "automatic": true,
+          "offsetM": 5.99205087641294
+        },
+        {
+          "controlId": "c8",
+          "method": "building_edge",
+          "automatic": true,
+          "offsetM": 1.3402421442744006
+        },
+        {
+          "controlId": "c9",
+          "method": "exact",
+          "automatic": false,
+          "offsetM": 0.0
+        },
+        {
+          "controlId": "c10",
+          "method": "exact",
+          "automatic": false,
+          "offsetM": 0.0
+        },
+        {
+          "controlId": "c11",
+          "method": "building_edge",
+          "automatic": true,
+          "offsetM": 2.337916188380571
+        }
+      ],
+      "automaticApproaches": 6,
+      "reviewRequiredApproaches": 6,
+      "registrationP95M": 6.43,
+      "graphNodes": 227215,
+      "graphEdges": 1398660,
+      "graphHash": "f876d937c56023f78b50",
+      "elapsedSec": 3.09
+    },
+    {
+      "assetId": "szu-2",
+      "status": "NOT ROUTABLE",
+      "routable": false,
+      "controls": 6,
+      "resolved": 4,
+      "unresolved": [
+        {
+          "id": "c2",
+          "message": "圈心处的地物或通行侧不明确，请核对实际到访位置"
+        },
+        {
+          "id": "c7",
+          "message": "目标地物被禁入区域包围，请核对点位；不能跨禁区自动接入道路"
+        }
+      ],
+      "courseProblem": null,
+      "startFinish": {
+        "startLabel": "起终点",
+        "startPixel": [
+          643.5,
+          134.5
+        ],
+        "finishLabel": "起终点",
+        "finishPixel": [
+          643.5,
+          134.5
+        ],
+        "method": "detected_course_symbols"
+      },
+      "planStatus": null,
+      "routes": [],
+      "approaches": [
+        {
+          "controlId": "c3",
+          "method": "ink_stroke_edge",
+          "automatic": true,
+          "offsetM": 1.1113919252605993
+        },
+        {
+          "controlId": "c4",
+          "method": "ink_stroke_edge",
+          "automatic": true,
+          "offsetM": 1.5697219637482571
+        },
+        {
+          "controlId": "c5",
+          "method": "exact",
+          "automatic": false,
+          "offsetM": 0.0
+        },
+        {
+          "controlId": "c6",
+          "method": "exact",
+          "automatic": false,
+          "offsetM": 0.0
+        }
+      ],
+      "automaticApproaches": 2,
+      "reviewRequiredApproaches": 2,
+      "registrationP95M": 1.66,
+      "graphNodes": 39522,
+      "graphEdges": 224292,
+      "graphHash": "c3741b6f782a95ceec2e",
+      "elapsedSec": 0.21
+    },
+    {
+      "assetId": "szu-3",
+      "status": "ROUTABLE",
+      "routable": true,
+      "controls": 16,
+      "resolved": 16,
+      "unresolved": [],
+      "courseProblem": null,
+      "startFinish": {
+        "startLabel": "起终点",
+        "startPixel": [
+          2058.67,
+          631.17
+        ],
+        "finishLabel": "起终点",
+        "finishPixel": [
+          2058.67,
+          631.17
+        ],
+        "method": "detected_course_symbols"
+      },
+      "planStatus": "OPTIMAL",
+      "routes": [
+        {
+          "controlIds": [
+            "c6",
+            "c9",
+            "c12",
+            "c11",
+            "c8",
+            "c10",
+            "c13",
+            "c14",
+            "c17",
+            "c16",
+            "c15",
+            "c7",
+            "c2",
+            "c1",
+            "c4",
+            "c5"
+          ],
+          "distanceM": 4459.1,
+          "durationSec": 3286.5,
+          "checkedEdges": 2619
+        }
+      ],
+      "approaches": [
+        {
+          "controlId": "c1",
+          "method": "exact",
+          "automatic": false,
+          "offsetM": 0.0
+        },
+        {
+          "controlId": "c2",
+          "method": "small_water_feature_edge",
+          "automatic": true,
+          "offsetM": 2.0079663539260926
+        },
+        {
+          "controlId": "c4",
+          "method": "exact",
+          "automatic": false,
+          "offsetM": 0.0
+        },
+        {
+          "controlId": "c5",
+          "method": "exact",
+          "automatic": false,
+          "offsetM": 0.0
+        },
+        {
+          "controlId": "c6",
+          "method": "exact",
+          "automatic": false,
+          "offsetM": 0.0
+        },
+        {
+          "controlId": "c7",
+          "method": "point_symbol_edge",
+          "automatic": true,
+          "offsetM": 1.8966081778742463
+        },
+        {
+          "controlId": "c8",
+          "method": "exact",
+          "automatic": false,
+          "offsetM": 0.0
+        },
+        {
+          "controlId": "c9",
+          "method": "exact",
+          "automatic": false,
+          "offsetM": 0.0
+        },
+        {
+          "controlId": "c10",
+          "method": "exact",
+          "automatic": false,
+          "offsetM": 0.0
+        },
+        {
+          "controlId": "c11",
+          "method": "point_symbol_edge",
+          "automatic": true,
+          "offsetM": 1.4711190012124662
+        },
+        {
+          "controlId": "c12",
+          "method": "exact",
+          "automatic": false,
+          "offsetM": 0.0
+        },
+        {
+          "controlId": "c13",
+          "method": "point_symbol_edge",
+          "automatic": true,
+          "offsetM": 2.1006965194914975
+        },
+        {
+          "controlId": "c14",
+          "method": "building_edge",
+          "automatic": true,
+          "offsetM": 0.9038508065034295
+        },
+        {
+          "controlId": "c15",
+          "method": "water_edge",
+          "automatic": true,
+          "offsetM": 2.229618856994015
+        },
+        {
+          "controlId": "c16",
+          "method": "exact",
+          "automatic": false,
+          "offsetM": 0.0
+        },
+        {
+          "controlId": "c17",
+          "method": "point_symbol_edge",
+          "automatic": true,
+          "offsetM": 1.7105162227725437
+        }
+      ],
+      "automaticApproaches": 7,
+      "reviewRequiredApproaches": 7,
+      "registrationP95M": 8.49,
+      "graphNodes": 306328,
+      "graphEdges": 1872382,
+      "graphHash": "2570e1372e5059e7a540",
+      "elapsedSec": 5.64
+    }
+  ],
+  "allRoutable": false
+}

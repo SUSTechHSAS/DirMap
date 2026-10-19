@@ -1,0 +1,7 @@
+# Build-time dependencies only: the web application is pure static files.
+# Install with: python3 -m pip install --target .pydeps -r requirements.txt
+numpy==2.5.4
+scipy==1.18.1
+opencv-python-headless==4.14.0.94
+pygeomag==1.1.0
+ortools==9.15.6755

@@ -1,0 +1,77 @@
+{
+ "approaches": [],
+ "assetId": "szu-2",
+ "connectorWeights": [],
+ "connectors": [],
+ "endpoints": [],
+ "finishPixel": [
+  643.5,
+  134.5
+ ],
+ "graphHash": "c3741b6f782a95ceec2e",
+ "matrix": null,
+ "metric": "time",
+ "nodes": [],
+ "request": {
+  "assetId": "szu-2",
+  "controlIds": [
+   "c2",
+   "c3",
+   "c4",
+   "c5",
+   "c6",
+   "c7"
+  ],
+  "finishPixel": [
+   643.5,
+   134.5
+  ],
+  "metric": "time",
+  "startPixel": [
+   643.5,
+   134.5
+  ],
+  "version": 13
+ },
+ "scenario": {
+  "controlIds": [
+   "c2",
+   "c3",
+   "c4",
+   "c5",
+   "c6",
+   "c7"
+  ],
+  "finishPixel": [
+   643.5,
+   134.5
+  ],
+  "metric": "time",
+  "startPixel": [
+   643.5,
+   134.5
+  ]
+ },
+ "start": {
+  "controlId": "c1",
+  "pixel": [
+   643.5,
+   134.5
+  ]
+ },
+ "startNode": 1485,
+ "startPixel": [
+  643.5,
+  134.5
+ ],
+ "unresolved": [
+  {
+   "id": "c2",
+   "message": "圈心处的地物或通行侧不明确，请核对实际到访位置"
+  },
+  {
+   "id": "c7",
+   "message": "目标地物被禁入区域包围，请核对点位；不能跨禁区自动接入道路"
+  }
+ ]
+}

@@ -1,0 +1,70 @@
+{
+ "generatedAt": "2026-10-19T02:56:39.362335+00:00",
+ "legends": [
+  {
+   "name": "ISSprOM2019-2图例.pdf",
+   "url": "data/legends/legend-0.pdf"
+  },
+  {
+   "name": "____________aigc_label.png",
+   "url": "data/legends/legend-1.png"
+  }
+ ],
+ "maps": [
+  {
+   "controls": 11,
+   "courseDefaults": null,
+   "filename": "image_1791593207568.jpg",
+   "hasApproaches": true,
+   "hasGraph": true,
+   "id": "szu-1",
+   "name": "深大定向图 1",
+   "processed": true,
+   "sha256": "32dc67e75f88bcee67e3a5f7d56cd18e81d0f5172b9a6f518cd4bab71a4487cc",
+   "version": 8
+  },
+  {
+   "controls": 7,
+   "courseDefaults": null,
+   "filename": "image_1791593257267.jpg",
+   "hasApproaches": true,
+   "hasGraph": true,
+   "id": "szu-2",
+   "name": "深大定向图 2",
+   "processed": true,
+   "sha256": "dec799aba2b1904a6ceafbb589510086328663afeefa21dc91182690456fc3c6",
+   "version": 13
+  },
+  {
+   "controls": 17,
+   "courseDefaults": {
+    "description": "31、32、33 每队必到，当前任意顺序；其余选中点由全班分担。",
+    "mandatoryLabels": [
+     "31",
+     "32",
+     "33"
+    ],
+    "mandatoryOrder": false,
+    "mode": "mixed_coverage",
+    "source": "用户于 2026-10-18 明确确认；顺序要求可配置"
+   },
+   "filename": "image_1791942468319.jpg",
+   "hasApproaches": true,
+   "hasGraph": true,
+   "id": "szu-3",
+   "name": "深大定向图 3",
+   "processed": true,
+   "sha256": "28a4a358bf853003839c187e708e546e2bcea08bbddbc2601184c780907ac16b",
+   "version": 11
+  }
+ ],
+ "reference": {
+  "attribution": "© OpenStreetMap contributors",
+  "crs": "WGS84",
+  "licenseUrl": "https://www.openstreetmap.org/copyright",
+  "name": "深圳大学粤海校区"
+ },
+ "routingSchema": "native-quadtree-v4-roof-palette",
+ "static": true,
+ "terrainSchema": "course-occlusion-v2-roof-palette"
+}

@@ -1,0 +1,12 @@
+{
+  "auditedAt": "2026-10-19T03:18:37.184268+00:00",
+  "url": "http://127.0.0.1:8765",
+  "httpHealth": 200,
+  "application": 200,
+  "currentOverlay": 200,
+  "staleOverlay": 409,
+  "persistedJobCount": 3,
+  "persistedJobsSucceeded": true,
+  "currentMapVersion": 11,
+  "sourceDataAlteredByCheck": false
+}

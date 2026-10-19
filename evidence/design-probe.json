@@ -1,0 +1,272 @@
+{
+  "scope": "synthetic mathematical fixtures only; no supplied image pixels or phone hardware used",
+  "passed": true,
+  "check_count": 21,
+  "checks": [
+    {
+      "name": "robust_affine_rejects_wrong_correspondence",
+      "passed": true,
+      "evidence": {
+        "inliers": 8,
+        "total_candidates": 9,
+        "max_error_m": 4.0194366942304644e-14
+      }
+    },
+    {
+      "name": "collinear_anchors_rejected",
+      "passed": true,
+      "evidence": "degenerate control geometry"
+    },
+    {
+      "name": "local_mesh_represents_fixture_global_affine_does_not",
+      "passed": true,
+      "evidence": {
+        "withheld_points": 8,
+        "global_affine_rmse_m": 5.099019513592781,
+        "mesh_rmse_m": 6.280369834735101e-16,
+        "mesh_roundtrip_max_error_m": 1.4210854715202004e-14,
+        "caveat": "Piecewise-affine truth by construction; no inference about real maps."
+      }
+    },
+    {
+      "name": "folded_mesh_rejected",
+      "passed": true,
+      "evidence": "folded or collapsed mesh"
+    },
+    {
+      "name": "outside_hull_rejected",
+      "passed": true,
+      "evidence": "outside calibrated hull"
+    },
+    {
+      "name": "heading_wraps_across_north",
+      "passed": true,
+      "evidence": {
+        "359_to_1_halfway_deg": 0.0
+      }
+    },
+    {
+      "name": "nonfinite_heading_rejected",
+      "passed": true,
+      "evidence": "invalid heading sample"
+    },
+    {
+      "name": "clockwise_map_rotation_cardinal_0",
+      "passed": true,
+      "evidence": {
+        "heading_deg": 0,
+        "map_clockwise_rotation_deg": 0
+      }
+    },
+    {
+      "name": "clockwise_map_rotation_cardinal_90",
+      "passed": true,
+      "evidence": {
+        "heading_deg": 90,
+        "map_clockwise_rotation_deg": 270
+      }
+    },
+    {
+      "name": "clockwise_map_rotation_cardinal_180",
+      "passed": true,
+      "evidence": {
+        "heading_deg": 180,
+        "map_clockwise_rotation_deg": 180
+      }
+    },
+    {
+      "name": "clockwise_map_rotation_cardinal_270",
+      "passed": true,
+      "evidence": {
+        "heading_deg": 270,
+        "map_clockwise_rotation_deg": 90
+      }
+    },
+    {
+      "name": "route_uses_gate_instead_of_crossing_wall",
+      "passed": true,
+      "evidence": {
+        "straight_line_m": 6.0,
+        "legal_path_m": 14.0,
+        "path": [
+          [
+            1,
+            5
+          ],
+          [
+            2,
+            5
+          ],
+          [
+            3,
+            5
+          ],
+          [
+            3,
+            4
+          ],
+          [
+            3,
+            3
+          ],
+          [
+            3,
+            2
+          ],
+          [
+            3,
+            1
+          ],
+          [
+            4,
+            1
+          ],
+          [
+            5,
+            1
+          ],
+          [
+            6,
+            1
+          ],
+          [
+            7,
+            1
+          ],
+          [
+            7,
+            2
+          ],
+          [
+            7,
+            3
+          ],
+          [
+            7,
+            4
+          ],
+          [
+            7,
+            5
+          ]
+        ]
+      }
+    },
+    {
+      "name": "closed_gate_makes_required_control_unreachable",
+      "passed": true,
+      "evidence": "unreachable mandatory endpoint"
+    },
+    {
+      "name": "diagonal_corner_cutting_rejected",
+      "passed": true,
+      "evidence": "unreachable mandatory endpoint"
+    },
+    {
+      "name": "coincident_layers_do_not_create_junction",
+      "passed": true,
+      "evidence": "unreachable mandatory endpoint"
+    },
+    {
+      "name": "explicit_portal_connects_layers",
+      "passed": true,
+      "evidence": null
+    },
+    {
+      "name": "single_team_tour_matches_exhaustive_optimum",
+      "passed": true,
+      "evidence": {
+        "targets": 5,
+        "optimal_fixture_length_m": 28.0,
+        "route_indexes": [
+          0,
+          1,
+          2,
+          3,
+          5,
+          4,
+          0
+        ]
+      }
+    },
+    {
+      "name": "split_coverage_visits_each_target_exactly_once",
+      "passed": true,
+      "evidence": {
+        "routes": [
+          [
+            0,
+            4,
+            0
+          ],
+          [
+            0,
+            1,
+            2,
+            3,
+            5,
+            0
+          ]
+        ]
+      }
+    },
+    {
+      "name": "two_team_minmax_matches_independent_exhaustive_oracle",
+      "passed": true,
+      "evidence": {
+        "objective_seconds_max_then_sum": [
+          18.666666666666668,
+          24.666666666666668
+        ],
+        "team_seconds": [
+          6.0,
+          18.666666666666668
+        ],
+        "team_speeds_mps": [
+          1.0,
+          1.5
+        ],
+        "no_service_or_congestion_in_fixture": true
+      }
+    },
+    {
+      "name": "all_visit_is_separate_from_split_coverage",
+      "passed": true,
+      "evidence": {
+        "visits_per_target": 2,
+        "routes": [
+          [
+            0,
+            1,
+            2,
+            3,
+            5,
+            4,
+            0
+          ],
+          [
+            0,
+            1,
+            2,
+            3,
+            5,
+            4,
+            0
+          ]
+        ]
+      }
+    },
+    {
+      "name": "optimized_routes_expand_to_legal_graph_edges",
+      "passed": true,
+      "evidence": null
+    }
+  ],
+  "environment": {
+    "python": "3.14.4",
+    "platform": "linux",
+    "peak_rss_kib_linux": 17512
+  },
+  "elapsed_seconds": 0.013754,
+  "run_at_utc": "2026-10-14T23:25:38.623520+00:00"
+}

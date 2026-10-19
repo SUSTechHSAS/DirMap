@@ -1,0 +1,1 @@
+{"auditedAt":"2026-10-19T02:54:31.776127+00:00","httpsHealth":200,"httpsApplication":200,"httpHealth":200,"customCATrustVerified":true,"publicCertificateDownload":200,"privateFilesNotServed":true,"unauthenticatedTeacherWrite":401,"authenticatedMalformedWrite":422,"systemTrustStoreModified":false,"phoneSensorTested":false,"jobQueuePersists":true}

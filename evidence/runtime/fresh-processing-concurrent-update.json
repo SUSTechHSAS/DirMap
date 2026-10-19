@@ -1,0 +1,193 @@
+{
+  "auditedAt": "2026-10-19T02:57:45.169660+00:00",
+  "scope": "Rebuild all three maps from the source images in a disposable empty project.\n\nNo prior fit, checkpoint edits or graph cache is copied. This verifies the\nautomatic pipeline, not independent geographic accuracy or field passage.\n",
+  "copiedProjectStates": false,
+  "reusedPreparedGraphCache": false,
+  "maps": [
+    {
+      "assetId": "szu-1",
+      "sourceHash": "32dc67e75f88bcee67e3a5f7d56cd18e81d0f5172b9a6f518cd4bab71a4487cc",
+      "version": 1,
+      "detectedLabels": [
+        "31",
+        "32",
+        "33",
+        "34",
+        "35",
+        "36",
+        "37",
+        "38",
+        "39",
+        "40"
+      ],
+      "labelsMatched": true,
+      "startFinishMatched": true,
+      "calibratedControls": 10,
+      "controls": 10,
+      "registrationHash": "efaf444fe7fb48c041c86cefaf943a353901dfc597d7e61aa5740038fe57ecd4",
+      "quality": {
+        "fitCount": 146,
+        "fitObjectCount": 34,
+        "validationCount": 43,
+        "validationObjectCount": 13,
+        "validationInsideHull": 43,
+        "rejectedObjectIds": [
+          "231311762"
+        ],
+        "medianErrorM": 2.53,
+        "p95ErrorM": 7.45,
+        "maxErrorM": 20.38,
+        "affineFallback": false,
+        "foldedTriangles": 0,
+        "state": "needs_review",
+        "method": "water_seed_observed_outline_ransac_mesh",
+        "candidateTransforms": 2106,
+        "observedCornerCount": 173,
+        "validationScope": "按地物整体留出内部核查点，实测边界角点用于拟合；自动对应关系未人工核对，不等价于独立现场定位精度。"
+      },
+      "processingElapsedSec": 66.648,
+      "preprocessingUnder120Sec": true,
+      "fullCourseUnresolved": [],
+      "graphHash": "e29657ed0614c99c113a"
+    },
+    {
+      "assetId": "szu-2",
+      "sourceHash": "dec799aba2b1904a6ceafbb589510086328663afeefa21dc91182690456fc3c6",
+      "version": 1,
+      "detectedLabels": [
+        "31",
+        "32",
+        "33",
+        "34",
+        "35",
+        "36"
+      ],
+      "labelsMatched": true,
+      "startFinishMatched": true,
+      "calibratedControls": 6,
+      "controls": 6,
+      "registrationHash": "a2e29d0b6992665208feb75a7e71064deb8351c3787221f1755c592bc9f9a152",
+      "quality": {
+        "state": "needs_review",
+        "method": "sift_cross_map_observed_boundary_mesh",
+        "baseAssetId": "szu-1",
+        "fitCount": 64,
+        "validationCount": 11,
+        "medianErrorM": 0.77,
+        "p95ErrorM": 1.5,
+        "maxErrorM": 2.01,
+        "foldedTriangles": 0,
+        "inheritedGeographicP95M": 7.45,
+        "validationScope": "与已配准原图的内部留出接缝误差，边界由实测共同地物确定；绝对位置误差继承基准图。",
+        "geographicBoundaryAnchors": 3,
+        "baseVersion": 1,
+        "baseSourceHash": "32dc67e75f88bcee67e3a5f7d56cd18e81d0f5172b9a6f518cd4bab71a4487cc",
+        "baseRegistrationHash": "efaf444fe7fb48c041c86cefaf943a353901dfc597d7e61aa5740038fe57ecd4"
+      },
+      "processingElapsedSec": 23.611,
+      "preprocessingUnder120Sec": true,
+      "fullCourseUnresolved": [
+        {
+          "id": "c2",
+          "message": "圈心处的地物或通行侧不明确，请核对实际到访位置",
+          "label": "31"
+        },
+        {
+          "id": "c7",
+          "message": "目标地物被禁入区域包围，请核对点位；不能跨禁区自动接入道路",
+          "label": "35"
+        }
+      ],
+      "graphHash": "4340151cc3cce59c47ac"
+    },
+    {
+      "assetId": "szu-3",
+      "sourceHash": "28a4a358bf853003839c187e708e546e2bcea08bbddbc2601184c780907ac16b",
+      "version": 1,
+      "detectedLabels": [
+        "31",
+        "32",
+        "33",
+        "34",
+        "35",
+        "36",
+        "37",
+        "38",
+        "39",
+        "40",
+        "41",
+        "42",
+        "43",
+        "44",
+        "45",
+        "46"
+      ],
+      "labelsMatched": true,
+      "startFinishMatched": true,
+      "calibratedControls": 16,
+      "controls": 16,
+      "registrationHash": "2535e0e87b2cd2ccb621ba4b96bc5c1c4179fb45dd021da7611c612306dcea68",
+      "quality": {
+        "fitCount": 152,
+        "fitObjectCount": 38,
+        "validationCount": 52,
+        "validationObjectCount": 16,
+        "validationInsideHull": 52,
+        "rejectedObjectIds": [
+          "1558576826",
+          "230847108",
+          "230935217",
+          "231214221"
+        ],
+        "medianErrorM": 3.65,
+        "p95ErrorM": 8.49,
+        "maxErrorM": 18.34,
+        "affineFallback": true,
+        "foldedTriangles": 0,
+        "state": "needs_review",
+        "method": "water_seed_observed_outline_ransac_mesh",
+        "candidateTransforms": 1998,
+        "observedCornerCount": 194,
+        "validationScope": "按地物整体留出内部核查点，实测边界角点用于拟合；自动对应关系未人工核对，不等价于独立现场定位精度。"
+      },
+      "processingElapsedSec": 42.658,
+      "preprocessingUnder120Sec": true,
+      "fullCourseUnresolved": [],
+      "graphHash": "2570e1372e5059e7a540"
+    }
+  ],
+  "independentFieldValidation": false,
+  "fullObjectiveAchieved": false,
+  "existingProjectStatesUnchanged": false,
+  "automaticRecognitionSmokePassed": true,
+  "implementationSignature": "776ff4af161f624f192180294c586bd292425da78c47aaca1c1d9c531de45203",
+  "peakRSSMiB": 1189.7,
+  "finishedAt": "2026-10-19T03:00:01.666945+00:00",
+  "auditNote": "三张原图的自动识别检查全部通过。初次共享文件字节不变断言检测到工作台并发规划提交，因此失败；没有把这些并发更新回滚。后续验证加入临时进程写入保护，结果见 fresh-processing.json。",
+  "observedWorkbenchJobs": [
+    {
+      "id": "b4ad21df7d31486a",
+      "kind": "process",
+      "assetId": "szu-3",
+      "state": "succeeded",
+      "startedAt": 1792378575.4085798,
+      "finishedAt": 1792378615.1152103
+    },
+    {
+      "id": "5684df3f33f04390",
+      "kind": "plan",
+      "assetId": "szu-3",
+      "state": "succeeded",
+      "startedAt": 1792378638.1258726,
+      "finishedAt": 1792378667.927399
+    },
+    {
+      "id": "af472c07a0b7491a",
+      "kind": "plan",
+      "assetId": "szu-3",
+      "state": "succeeded",
+      "startedAt": 1792378691.0314672,
+      "finishedAt": 1792378720.8325498
+    }
+  ]
+}

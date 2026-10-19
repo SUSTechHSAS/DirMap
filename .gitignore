@@ -1,0 +1,15 @@
+__pycache__/
+.pytest_cache/
+node_modules/
+.npm-cache/
+web/dist/
+web/dist-sub/
+.venv/
+.pydeps/
+.cache/
+data/projects/*
+!data/projects/.gitkeep
+data/cache/
+test-results/
+playwright-report/
+.env

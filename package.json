@@ -1,0 +1,25 @@
+{
+  "name": "dirmap",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --config web/vite.config.ts",
+    "build": "tsc --noEmit && vite build --config web/vite.config.ts",
+    "build:pages": "tsc --noEmit && vite build --config web/vite.config.ts",
+    "preview": "vite preview --config web/vite.config.ts",
+    "bake": "PYTHONPATH=.pydeps DIRMAP_CACHE_DIR=$PWD/.cache python3 tools/bake_static.py",
+    "test": "node --experimental-strip-types --test tests/*.test.ts tests/static/*.test.ts",
+    "test:static": "node --experimental-strip-types --test tests/static/*.test.ts",
+    "test:browser": "playwright test",
+    "setup:bake": "python3 -m pip install --target .pydeps -r requirements.txt"
+  },
+  "dependencies": {
+    "ol": "^10.7.0"
+  },
+  "devDependencies": {
+    "vite": "^7.1.0",
+    "typescript": "^5.9.0",
+    "@playwright/test": "^1.58.0"
+  }
+}

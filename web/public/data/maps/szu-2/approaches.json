@@ -1,0 +1,142 @@
+{
+ "assetId": "szu-2",
+ "controls": {
+  "c2": {
+   "message": "圈心处的地物或通行侧不明确，请核对实际到访位置",
+   "ok": false
+  },
+  "c3": {
+   "automatic": true,
+   "component": 0,
+   "featureKind": "point_ink",
+   "lnglat": [
+    113.92968009135683,
+    22.535794879681806
+   ],
+   "local": [
+    -74.05724956492281,
+    88.02303790918245
+   ],
+   "method": "ink_stroke_edge",
+   "node": 29151,
+   "offsetM": 1.1113919252605993,
+   "ok": true,
+   "pixel": [
+    298.0,
+    373.0
+   ],
+   "reviewRequired": true,
+   "targetLnglat": [
+    113.92967243751488,
+    22.53580196300001
+   ],
+   "targetPixel": [
+    297.5,
+    372.5
+   ]
+  },
+  "c4": {
+   "automatic": true,
+   "component": 0,
+   "featureKind": "point_ink",
+   "lnglat": [
+    113.92783029865855,
+    22.534818634511304
+   ],
+   "local": [
+    -264.34606023107506,
+    -20.083972017751115
+   ],
+   "method": "ink_stroke_edge",
+   "node": 15409,
+   "offsetM": 1.5697219637482571,
+   "ok": true,
+   "pixel": [
+    176.5,
+    442.5
+   ],
+   "reviewRequired": true,
+   "targetLnglat": [
+    113.92784555782559,
+    22.5348185946506
+   ],
+   "targetPixel": [
+    177.5,
+    442.5
+   ]
+  },
+  "c5": {
+   "automatic": false,
+   "component": 0,
+   "lnglat": [
+    113.93178485912952,
+    22.534056951954984
+   ],
+   "local": [
+    142.460934645011,
+    -104.43084119067379
+   ],
+   "method": "exact",
+   "node": 7694,
+   "offsetM": 0.0,
+   "ok": true,
+   "pixel": [
+    435.5,
+    495.5
+   ],
+   "targetLnglat": [
+    113.93178485912952,
+    22.534056951954984
+   ],
+   "targetPixel": [
+    435.5,
+    495.5
+   ]
+  },
+  "c6": {
+   "automatic": false,
+   "component": 0,
+   "lnglat": [
+    113.92772032064475,
+    22.532276514857582
+   ],
+   "local": [
+    -275.6595363122031,
+    -301.5921043436705
+   ],
+   "method": "exact",
+   "node": 9073,
+   "offsetM": 0.0,
+   "ok": true,
+   "pixel": [
+    168.5,
+    622.5
+   ],
+   "targetLnglat": [
+    113.92772032064475,
+    22.532276514857582
+   ],
+   "targetPixel": [
+    168.5,
+    622.5
+   ]
+  },
+  "c7": {
+   "message": "目标地物被禁入区域包围，请核对点位；不能跨禁区自动接入道路",
+   "ok": false
+  }
+ },
+ "finishPixel": [
+  643.5,
+  134.5
+ ],
+ "graphHash": "c3741b6f782a95ceec2e",
+ "note": "到访位置在构建时按“起终点符号所在通行区域”预解算：先取无约束的合法到访位置，若其通行区域与起点不同，再按起点区域重新解算；失败时保存中文原因。浏览器须校验每个 ok 节点的 component 是否等于本文件的 startComponent，不一致时按“合法到访侧与起点不连通，请核对通道”处理。",
+ "routingSchema": "native-quadtree-v4-roof-palette",
+ "startComponent": 0,
+ "startNode": 1485,
+ "startPixel": [
+  643.5,
+  134.5
+ ]
+}
