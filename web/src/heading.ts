@@ -1,6 +1,6 @@
 /** Device angles and motion course are distinct sources, never interchanged. */
 export type HeadingSource = 'compass' | 'course';
-export type HeadingSample = { degrees: number; timestamp: number; source: HeadingSource; reference: 'true' | 'magnetic' };
+export type HeadingSample = { degrees: number; timestamp: number; source: HeadingSource; reference: 'true' | 'magnetic'; relative?: boolean };
 export const normalize = (degrees: number) => (degrees % 360 + 360) % 360;
 export const angleDelta = (from: number, to: number) => (to - from + 540) % 360 - 180;
 const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
@@ -10,8 +10,8 @@ export function smoothHeading(previous: number, next: number, elapsedMs: number,
   return normalize(previous + (1 - Math.exp(-elapsedMs / tauMs)) * angleDelta(previous, next));
 }
 
-export function orientationHeading(alpha: unknown, beta: unknown, gamma: unknown, screenAngle = 0, absolute = false): number | null {
-  if (!absolute || !finite(alpha) || !finite(beta) || !finite(gamma) || !finite(screenAngle)) return null;
+export function orientationHeading(alpha: unknown, beta: unknown, gamma: unknown, screenAngle = 0, absolute = false, allowRelative = false): number | null {
+  if ((!absolute && !allowRelative) || !finite(alpha) || !finite(beta) || !finite(gamma) || !finite(screenAngle)) return null;
   const [a, b, g, s] = [alpha, beta, gamma, screenAngle].map(value => value * Math.PI / 180);
   const ca = Math.cos(a), sa = Math.sin(a), cb = Math.cos(b), sb = Math.sin(b), cg = Math.cos(g), sg = Math.sin(g);
   // W3C Rz(alpha) Rx(beta) Ry(gamma), projected screen-top vector.
@@ -95,11 +95,14 @@ export class NavigationSensors {
   acceptedPositionCount = 0;
   lastGeoError: string | null = null;
   lastRawTimestamp = 0;
+  lastRawTimestampValue: number | null = null;
+  lastAccuracy: number | null = null;
   lastRawReceivedAt = 0;
   lastAcceptedReceivedAt = 0;
   orientationEventCount = 0;
   absoluteEventCount = 0;
   headingSampleCount = 0;
+  relativeSeen = false;
   locationTimeoutMs = 12000;
   active = false;
   declination: number | null = null;
@@ -119,8 +122,24 @@ export class NavigationSensors {
     this.orientationEventCount++;
     if (event.absolute === true || event.type === 'deviceorientationabsolute') this.absoluteEventCount++;
     const angle = screen.orientation?.angle ?? Number((window as Window & { orientation?: number }).orientation ?? 0);
-    const sample = compassSample(event, angle, timestamp, this.declination);
+    let sample = compassSample(event, angle, timestamp, this.declination);
+    let relative = false;
+    if (!sample) {
+      // No absolute north from this browser/device: expose the relative device
+      // direction so the teacher can still calibrate against a known bearing
+      // (map rotation stays disabled until calibrated).
+      const degrees = orientationHeading(event.alpha, event.beta, event.gamma, angle, false, true);
+      if (degrees !== null) {
+        sample = { degrees, timestamp, source: 'compass', reference: 'magnetic', relative: true };
+        relative = true;
+        if (!this.relativeSeen) {
+          this.relativeSeen = true;
+          this.onStatus('此设备/浏览器未提供绝对北向：已启用相对方向，请对准已知方位后点“校准罗盘”');
+        }
+      }
+    }
     if (sample) {
+      if (!relative) this.relativeSeen = false;
       sample.degrees = normalize(sample.degrees + this.offset);
       if (this.calibrated) sample.reference = 'true';
       this.filter.push(sample, Date.now());
@@ -211,18 +230,19 @@ export class NavigationSensors {
     const receivedAt = Date.now();
     this.rawPositionCount++;
     const rawTimestamp = (position as GeolocationPosition).timestamp;
-    // Providers may timestamp the first fix slightly BEFORE the watch started
-    // (cached/emulated fixes, clock skew on iOS and embedded WebViews). Accept
-    // it instead of silently rejecting every fix and leaving the app at
-    // “位置尚未开启”. Only clearly stale or future samples are discarded.
-    const timestamp = finite(rawTimestamp) && rawTimestamp > 0 ? rawTimestamp : receivedAt;
+    // Some OpenHarmony/ArkWeb and embedded WebViews return a monotonic
+    // DOMHighResTimeStamp (small value) or 0 instead of Unix epoch. Never use the
+    // provider timestamp to reject a fix: validate coordinates only and use the
+    // receive time for freshness/navigation. (The previous epoch comparison
+    // silently rejected every fix on those devices.)
+    const timestamp = finite(rawTimestamp) && rawTimestamp > 1e12 ? rawTimestamp : receivedAt;
     this.lastRawTimestamp = timestamp;
+    this.lastRawTimestampValue = finite(rawTimestamp) ? rawTimestamp : null;
     this.lastRawReceivedAt = receivedAt;
-    if (timestamp > receivedAt + 5000 || receivedAt - timestamp > 60000) return;
+    const accuracy = position.coords.accuracy;
+    this.lastAccuracy = finite(accuracy) ? accuracy : null;
     if (!finite(position.coords.latitude) || !finite(position.coords.longitude) ||
         Math.abs(position.coords.latitude) > 90 || Math.abs(position.coords.longitude) > 180) return;
-    const accuracy = position.coords.accuracy;
-    if (finite(accuracy) && (accuracy < 0 || accuracy > 10000)) return;
     this.acceptedPositionCount++;
     this.lastAcceptedReceivedAt = receivedAt;
     this.clearLocationTimer();
@@ -262,14 +282,18 @@ export class NavigationSensors {
       acceptedPositionCount: this.acceptedPositionCount,
       lastGeoError: this.lastGeoError,
       lastRawTimestamp: this.lastRawTimestamp,
+      lastRawTimestampValue: this.lastRawTimestampValue,
+      lastAccuracy: this.lastAccuracy,
       lastRawReceivedAt: this.lastRawReceivedAt,
       lastAcceptedReceivedAt: this.lastAcceptedReceivedAt,
       locationTimeoutMs: this.locationTimeoutMs,
       orientationSupported: typeof window !== 'undefined' && typeof window.DeviceOrientationEvent !== 'undefined',
       orientationPermissionGranted: this.permissionGranted,
+      orientationPermissionRequired: typeof window !== 'undefined' && typeof (window as unknown as { DeviceOrientationEvent?: { requestPermission?: unknown } }).DeviceOrientationEvent?.requestPermission === 'function',
       orientationEventCount: this.orientationEventCount,
       absoluteEventCount: this.absoluteEventCount,
       headingSampleCount: this.headingSampleCount,
+      relativeSeen: this.relativeSeen,
       heading: this.filter.value(Date.now())?.degrees ?? null,
     };
   }

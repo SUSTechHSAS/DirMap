@@ -631,8 +631,16 @@ $('follow-button').onclick = async () => {
 $('north-button').onclick = () => { northOnly = true; campusMap.northUp(); $('compass-arrow').style.transform = 'rotate(0deg)'; $('sensor-status').textContent = '北向上 · 点击跟随按钮恢复朝向跟随'; };
 sensors.onHeading = (sample: HeadingSample | null) => {
   if (!sample) { if (sensors.active && !northOnly) $('sensor-status').textContent = '等待可靠朝向 · 可缓慢走动或校准罗盘'; return; }
-  if (follow && !northOnly) { campusMap.setHeading(sample.degrees); $('compass-arrow').style.transform = `rotate(${-sample.degrees}deg)`; }
-  if (!northOnly) $('sensor-status').textContent = `${sample.source === 'compass' ? sample.reference === 'true' ? '罗盘方向' : '罗盘方向（北向待校准）' : '行进方向'} ${Math.round(sample.degrees)}°${follow ? ' · 跟随中' : ' · 已暂停跟随'}`;
+  const relative = sample.relative === true && !sensors.calibrated;
+  if (follow && !northOnly && !relative) {
+    campusMap.setHeading(sample.degrees);
+    $('compass-arrow').style.transform = `rotate(${-sample.degrees}deg)`;
+  }
+  if (!northOnly) {
+    const label = relative ? '设备相对方向（未校准，地图不旋转）'
+      : sample.source === 'compass' ? sample.reference === 'true' ? '罗盘方向' : '罗盘方向（北向待校准）' : '行进方向';
+    $('sensor-status').textContent = `${label} ${Math.round(sample.degrees)}°${relative ? ' · 请点“校准罗盘”对准已知北向' : follow ? ' · 跟随中' : ' · 已暂停跟随'}`;
+  }
 };
 sensors.onPosition = position => {
   lastPosition = position; lastPositionReceivedAt = Date.now();
@@ -691,12 +699,13 @@ $('open-diagnostics').onclick = () => {
       `定位接口: ${navigator.geolocation ? '有' : '无'}`,
       `定位已启动: ${d.active ? '是' : '否'}   定时器/监看: ${d.watchId ?? 'null'}`,
       `原始定位回调次数: ${d.rawPositionCount}   通过校验次数: ${d.acceptedPositionCount}`,
-      `最后原始时间戳距今: ${age(d.lastRawTimestamp)}`,
+      `原始 timestamp 值: ${d.lastRawTimestampValue ?? '缺失'}（非 Unix 毫秒时按接收时间处理）`,
+      `最后原始位置距今: ${age(d.lastRawReceivedAt)}   精度: ${d.lastAccuracy ?? '未知'} m`,
       `最后通过校验距今: ${age(d.lastAcceptedReceivedAt)}`,
       `最近定位错误: ${d.lastGeoError ?? '无'}`,
-      `朝向接口: ${d.orientationSupported ? '有' : '无'}   朝向权限: ${d.orientationPermissionGranted ? '已允许' : '未允许/未请求'}`,
+      `朝向接口: ${d.orientationSupported ? '有' : '无'}   朝向权限: ${d.orientationPermissionRequired ? (d.orientationPermissionGranted ? '已允许' : '未允许/未请求（iOS 需允许“动作与方向”）') : '无需（非 iOS）'}`,
       `朝向事件: ${d.orientationEventCount}（其中绝对方向 ${d.absoluteEventCount}）   有效朝向样本: ${d.headingSampleCount}`,
-      `当前朝向: ${d.heading === null ? '无' : `${Math.round(d.heading)}°`}`,
+      `当前朝向: ${d.heading === null ? '无' : `${Math.round(d.heading)}°`}${d.relativeSeen ? '（相对方向，需校准）' : ''}`,
       `UA: ${navigator.userAgent}`,
     ].join('\n');
   };
