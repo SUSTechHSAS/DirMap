@@ -4,6 +4,8 @@ export type HeadingSample = { degrees: number; timestamp: number; source: Headin
 export const normalize = (degrees: number) => (degrees % 360 + 360) % 360;
 export const angleDelta = (from: number, to: number) => (to - from + 540) % 360 - 180;
 const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
+/** Minimal Generic Sensor handle used by the sensor-API fallbacks. */
+type SensorHandle = { start(): void; stop(): void };
 
 export function smoothHeading(previous: number, next: number, elapsedMs: number, tauMs = 250): number {
   if (![previous, next, elapsedMs, tauMs].every(finite) || elapsedMs < 0 || tauMs <= 0) throw new Error('Invalid heading');
@@ -107,7 +109,13 @@ export class NavigationSensors {
   lastAbsoluteSampleAt = 0;
   sensorSampleCount = 0;
   locationTimeoutMs = 12000;
-  private orientationSensor: { start(): void; stop(): void } | null = null;
+  private orientationSensor: SensorHandle | null = null;
+  private magnetometer: SensorHandle | null = null;
+  private accelerometer: SensorHandle | null = null;
+  private magReading: { x: number; y: number; z: number; at: number } | null = null;
+  private accReading: { x: number; y: number; z: number; at: number } | null = null;
+  private sensorState = '未启动';
+  private sensorError: string | null = null;
   private sensorTimer: ReturnType<typeof setTimeout> | null = null;
   active = false;
   declination: number | null = null;
@@ -132,7 +140,7 @@ export class NavigationSensors {
     if (sample) {
       this.absoluteSampleCount++;
       this.lastAbsoluteSampleAt = Date.now();
-      if (this.orientationSensor) this.stopOrientationSensor();
+      if (this.orientationSensor || this.magnetometer) this.stopSensorFallbacks();
     } else {
       // Both `deviceorientation` (relative) and `deviceorientationabsolute`
       // events fire on most phones. Only fall back to the relative device
@@ -210,7 +218,7 @@ export class NavigationSensors {
     // deviceorientation events without a usable absolute heading but do expose
     // the Generic Sensor API. Try it when no absolute sample arrived.
     this.sensorTimer = setTimeout(() => {
-      if (this.active && this.absoluteSampleCount === 0) this.startOrientationSensor();
+      if (this.active && this.absoluteSampleCount === 0) this.startSensorFallbacks();
     }, 3000);
     this.timer = setInterval(() => { if (!document.hidden) this.onHeading(this.filter.value(Date.now())); }, 50);
   }
@@ -292,57 +300,138 @@ export class NavigationSensors {
     }
   }
 
-  /** OrientationSensor API fallback (absolute north when DOM events lack it). */
-  private startOrientationSensor() {
-    if (this.orientationSensor) return;
-    const Ctor = (window as unknown as { AbsoluteOrientationSensor?: new (options?: unknown) => {
-      start(): void; stop(): void; quaternion?: number[] | null;
-      onreading: (() => void) | null; onerror: (() => void) | null;
-    } }).AbsoluteOrientationSensor;
-    if (typeof Ctor !== 'function') return;
-    const begin = () => {
-      if (!this.active || this.orientationSensor) return;
-      try {
-        const sensor = new Ctor({ frequency: 30, referenceFrame: 'device' });
-        sensor.onreading = () => {
-          if (!this.active) return;
-          const q = sensor.quaternion;
-          if (!q || q.length < 4) return;
-          const angle = (screen.orientation?.angle ?? Number((window as Window & { orientation?: number }).orientation ?? 0)) * Math.PI / 180;
-          const [x, y, z, w] = q;
-          // Rotate the screen-top vector into the earth frame (x east, y north).
-          const vx = Math.sin(angle), vy = Math.cos(angle);
-          const east = (1 - 2 * (y * y + z * z)) * vx + 2 * (x * y - w * z) * vy;
-          const north = 2 * (x * y + w * z) * vx + (1 - 2 * (x * x + z * z)) * vy;
-          if (Math.hypot(east, north) < .25) return;
-          const now = Date.now();
-          const degrees = normalize(Math.atan2(east, north) * 180 / Math.PI + (this.declination ?? 0));
-          const sample: HeadingSample = { degrees, timestamp: now, source: 'compass', reference: this.declination === null ? 'magnetic' : 'true' };
-          this.headingSampleCount++;
-          this.absoluteSampleCount++;
-          this.sensorSampleCount++;
-          this.lastAbsoluteSampleAt = now;
-          this.filter.push(sample, now);
-          if (!this.headingSeen) {
-            this.headingSeen = true;
-            if (this.headingTimer !== null) clearTimeout(this.headingTimer);
-            this.headingTimer = null;
-          }
-        };
-        sensor.onerror = () => { try { sensor.stop(); } catch { /* ignore */ } this.orientationSensor = null; };
-        sensor.start();
-        this.orientationSensor = sensor;
-      } catch { this.orientationSensor = null; }
-    };
-    // Do not gate on permissions.query('accelerometer'): many browsers report
-    // 'denied' there while the sensor still starts (or throws a catchable
-    // NotAllowedError on start). Attempt it and ignore failures.
-    begin();
+  /** Sensor-API fallbacks when DOM orientation events lack a usable north. */
+  private startSensorFallbacks() {
+    if (this.orientationSensor || this.magnetometer) return;
+    if (this.startAbsoluteOrientationSensor()) return;
+    this.startMagnetometer();
   }
 
-  private stopOrientationSensor() {
+  /** AbsoluteOrientationSensor gives a quaternion in the earth frame. */
+  private startAbsoluteOrientationSensor(): boolean {
+    const Ctor = (window as unknown as { AbsoluteOrientationSensor?: new (options?: unknown) => SensorHandle & {
+      quaternion?: number[] | null; onreading: (() => void) | null; onerror: (() => void) | null;
+    } }).AbsoluteOrientationSensor;
+    if (typeof Ctor !== 'function') { this.sensorState = 'AbsoluteOrientationSensor 不可用'; return false; }
+    try {
+      const sensor = new Ctor({ frequency: 30, referenceFrame: 'device' });
+      sensor.onreading = () => {
+        if (!this.active) return;
+        const q = sensor.quaternion;
+        if (!q || q.length < 4) return;
+        const angle = (screen.orientation?.angle ?? Number((window as Window & { orientation?: number }).orientation ?? 0)) * Math.PI / 180;
+        const [x, y, z, w] = q;
+        // Rotate the screen-top vector into the earth frame (x east, y north).
+        const vx = Math.sin(angle), vy = Math.cos(angle);
+        const east = (1 - 2 * (y * y + z * z)) * vx + 2 * (x * y - w * z) * vy;
+        const north = 2 * (x * y + w * z) * vx + (1 - 2 * (x * x + z * z)) * vy;
+        if (Math.hypot(east, north) < .25) return;
+        this.pushSensorHeading(Math.atan2(east, north) * 180 / Math.PI, Date.now());
+      };
+      sensor.onerror = () => {
+        this.sensorError = 'AbsoluteOrientationSensor 启动失败'; this.sensorState = 'AbsoluteOrientationSensor 错误';
+        try { sensor.stop(); } catch { /* ignore */ }
+        this.orientationSensor = null;
+        this.startMagnetometer();
+      };
+      sensor.start();
+      this.orientationSensor = sensor;
+      this.sensorState = 'AbsoluteOrientationSensor 已启用';
+      return true;
+    } catch (error) {
+      this.sensorError = `AbsoluteOrientationSensor: ${error instanceof Error ? error.message : String(error)}`;
+      this.sensorState = 'AbsoluteOrientationSensor 错误';
+      return false;
+    }
+  }
+
+  /** Magnetometer + accelerometer give a tilt-compensated compass heading. */
+  private startMagnetometer() {
+    if (this.magnetometer) return;
+    type VectorSensor = new (options?: unknown) => SensorHandle & {
+      x?: number; y?: number; z?: number; onreading: (() => void) | null; onerror: (() => void) | null;
+    };
+    const api = window as unknown as { Magnetometer?: VectorSensor; Accelerometer?: VectorSensor };
+    if (typeof api.Magnetometer !== 'function' || typeof api.Accelerometer !== 'function') {
+      this.sensorState = '浏览器不提供 Sensor API';
+      this.sensorError = 'AbsoluteOrientationSensor / Magnetometer / Accelerometer 均不可用';
+      this.onStatus('此浏览器未向网页提供设备朝向数据：可在浏览器设置中允许“运动与方向/传感器”，或更换浏览器');
+      return;
+    }
+    try {
+      const magnetometer = new api.Magnetometer({ frequency: 10, referenceFrame: 'device' });
+      const accelerometer = new api.Accelerometer({ frequency: 10, referenceFrame: 'device' });
+      magnetometer.onreading = () => {
+        if (typeof magnetometer.x !== 'number') return;
+        this.magReading = { x: magnetometer.x, y: magnetometer.y ?? 0, z: magnetometer.z ?? 0, at: Date.now() };
+        this.pushMagnetometerHeading();
+      };
+      accelerometer.onreading = () => {
+        if (typeof accelerometer.x !== 'number') return;
+        this.accReading = { x: accelerometer.x, y: accelerometer.y ?? 0, z: accelerometer.z ?? 0, at: Date.now() };
+        this.pushMagnetometerHeading();
+      };
+      const fail = () => {
+        this.sensorState = 'Magnetometer 错误';
+        this.sensorError = this.sensorError ?? '浏览器拒绝提供磁力计/加速度计数据';
+        this.stopSensorFallbacks();
+      };
+      magnetometer.onerror = fail; accelerometer.onerror = fail;
+      magnetometer.start(); accelerometer.start();
+      this.magnetometer = magnetometer; this.accelerometer = accelerometer;
+      this.sensorState = 'Magnetometer + Accelerometer 已启用';
+    } catch (error) {
+      this.sensorState = 'Magnetometer 错误';
+      this.sensorError = `Magnetometer: ${error instanceof Error ? error.message : String(error)}`;
+      this.onStatus('此浏览器未向网页提供设备朝向数据：可在浏览器设置中允许“运动与方向/传感器”，或更换浏览器');
+    }
+  }
+
+  private pushMagnetometerHeading() {
+    const mag = this.magReading, acc = this.accReading;
+    if (!mag || !acc || Math.abs(mag.at - acc.at) > 500) return;
+    const acceleration = Math.hypot(acc.x, acc.y, acc.z);
+    if (!Number.isFinite(acceleration) || acceleration < 1e-3) return;
+    const up = [acc.x / acceleration, acc.y / acceleration, acc.z / acceleration];
+    const vertical = mag.x * up[0] + mag.y * up[1] + mag.z * up[2];
+    const horizontal = [mag.x - vertical * up[0], mag.y - vertical * up[1], mag.z - vertical * up[2]];
+    if (Math.hypot(horizontal[0], horizontal[1], horizontal[2]) < 1e-3) return;
+    const project = (v: number[]) => {
+      const dot = v[0] * up[0] + v[1] * up[1] + v[2] * up[2];
+      return [v[0] - dot * up[0], v[1] - dot * up[1], v[2] - dot * up[2]];
+    };
+    const angle = (screen.orientation?.angle ?? Number((window as Window & { orientation?: number }).orientation ?? 0)) * Math.PI / 180;
+    const top = project([Math.sin(angle), Math.cos(angle), 0]);
+    const right = project([Math.cos(angle), -Math.sin(angle), 0]);
+    if (Math.hypot(top[0], top[1], top[2]) < 1e-3) return;
+    const dot = (a: number[], b: number[]) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    const heading = Math.atan2(-dot(horizontal, right), dot(horizontal, top)) * 180 / Math.PI;
+    this.pushSensorHeading(heading, Date.now());
+  }
+
+  /** Feed a sensor-derived absolute heading through the same smoothing path. */
+  private pushSensorHeading(rawDegrees: number, now: number) {
+    if (!Number.isFinite(rawDegrees)) return;
+    const degrees = normalize(rawDegrees + (this.declination ?? 0));
+    const sample: HeadingSample = { degrees, timestamp: now, source: 'compass', reference: this.declination === null ? 'magnetic' : 'true' };
+    this.headingSampleCount++;
+    this.absoluteSampleCount++;
+    this.sensorSampleCount++;
+    this.lastAbsoluteSampleAt = now;
+    this.filter.push(sample, now);
+    if (!this.headingSeen) {
+      this.headingSeen = true;
+      if (this.headingTimer !== null) clearTimeout(this.headingTimer);
+      this.headingTimer = null;
+    }
+  }
+
+  private stopSensorFallbacks() {
     try { this.orientationSensor?.stop(); } catch { /* ignore */ }
-    this.orientationSensor = null;
+    try { this.magnetometer?.stop(); } catch { /* ignore */ }
+    try { this.accelerometer?.stop(); } catch { /* ignore */ }
+    this.orientationSensor = null; this.magnetometer = null; this.accelerometer = null;
+    this.magReading = null; this.accReading = null;
   }
 
   /** Snapshot for the in-app 定位诊断 panel. */
@@ -370,7 +459,12 @@ export class NavigationSensors {
       headingSampleCount: this.headingSampleCount,
       absoluteSampleCount: this.absoluteSampleCount,
       sensorSampleCount: this.sensorSampleCount,
+      sensorState: this.sensorState,
+      sensorError: this.sensorError,
       orientationSensorActive: this.orientationSensor !== null,
+      magnetometerActive: this.magnetometer !== null,
+      absoluteOrientationSensorAvailable: typeof (window as unknown as { AbsoluteOrientationSensor?: unknown }).AbsoluteOrientationSensor === 'function',
+      magnetometerAvailable: typeof (window as unknown as { Magnetometer?: unknown }).Magnetometer === 'function' && typeof (window as unknown as { Accelerometer?: unknown }).Accelerometer === 'function',
       relativeSeen: this.relativeSeen,
       heading: this.filter.value(Date.now())?.degrees ?? null,
     };
@@ -400,7 +494,7 @@ export class NavigationSensors {
     this.headingTimer = null; this.headingSeen = false;
     if (this.sensorTimer !== null) clearTimeout(this.sensorTimer);
     this.sensorTimer = null;
-    this.stopOrientationSensor();
+    this.stopSensorFallbacks();
     if (this.timer !== null) clearInterval(this.timer);
     this.timer = null;
     window.removeEventListener('deviceorientation', this.orientation);
